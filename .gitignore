@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Reproducible output from python -m src.prepare_data
+data/prepared/
