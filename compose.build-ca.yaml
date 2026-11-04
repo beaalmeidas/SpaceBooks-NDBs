@@ -1,0 +1,9 @@
+# Optional host trust bundle for networks with a locally trusted TLS proxy.
+services:
+  tools:
+    build:
+      secrets:
+        - pip_ca
+secrets:
+  pip_ca:
+    file: ${PIP_CA_FILE:-./.local/pip-ca.pem}

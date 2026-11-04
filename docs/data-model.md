@@ -1,6 +1,6 @@
 # Modelagem dos dados do SpaceBooks
 
-Os modelos em `src/domain/models.py` definem contratos antes da implementação dos bancos. São entidades imutáveis: alterações criam novas instâncias. As projeções retornam dicionários; não fazem persistência nem garantem integridade entre bancos.
+Os modelos em `src/domain/models.py` são entidades imutáveis: alterações criam novas instâncias. Suas projeções retornam dicionários. As conexões e a carga inicial estão em `src/database/`; ainda não há serviços de checkout ou sincronização de compras entre bancos.
 
 ## Identificadores e valores
 
@@ -18,7 +18,7 @@ Na importação, páginas iguais a zero tornam-se `null` (quantidade desconhecid
 
 `Customer.to_document()` produz documentos de `customers`, com `_id`, nome, e-mail, categorias e autores favoritos e data de criação. Preferências são listas, não strings contendo JSON. O modelo não implementa autenticação. Quando o login for implementado, senhas deverão ter hashes e tokens temporários ficarão no Redis.
 
-Índices planejados: `_id` único em livros e clientes; índice único de e-mail após definição de sua normalização; índices de busca por título, autores e categorias conforme as consultas da interface.
+Índices criados pela carga: `_id` único em livros e clientes (nativo do MongoDB); e-mail único normalizado; índice textual de título e autores; índices individuais de autores e categorias. A interface poderá ajustar os índices conforme suas consultas.
 
 ## Pedidos e checkout
 
@@ -28,7 +28,7 @@ Na importação, páginas iguais a zero tornam-se `null` (quantidade desconhecid
 
 O método não reserva estoque, não limpa o carrinho e não confirma pagamento. O futuro checkout deve validar o cliente e efetuar a baixa condicional do estoque junto à persistência do pedido. Sincronização com Neo4j e limpeza do Redis precisam de tratamento de falhas e repetição idempotente.
 
-Índices planejados: `_id` único e índice composto de `customer_id` e `created_at` para histórico.
+Índices criados pela carga: `_id` único (nativo do MongoDB) e índice composto de `customer_id` e `created_at` para histórico.
 
 ## Carrinho no Redis
 
@@ -59,10 +59,14 @@ A preparação exporta apenas os nós, `PERTENCE_A` e `PREFERE` derivados dos CS
 
 `Review.to_graph_record()` projeta uma avaliação. A regra proposta é uma avaliação atual por par cliente/livro: a futura escrita deve atualizar a relação existente. A existência dos clientes e livros precisa ser validada pelo serviço.
 
-O carregador futuro deverá criar constraints únicas para `id` em cada tipo de nó e usar Cypher parametrizado. O JSONL do grafo é um formato interno para esse carregador, não um dump nativo do Neo4j.
+O carregador cria constraints únicas para `id` em cada tipo de nó e usa Cypher parametrizado. Apenas os tipos de nós e relacionamentos iniciais definidos acima são aceitos na carga; os identificadores dos produtos e clientes devem coincidir com os documentos MongoDB. O JSONL do grafo é um formato interno, não um dump nativo do Neo4j.
 
 ## Preparação e limites
 
 `python -m src.prepare_data` lê os CSVs sem alterá-los e gera documentos JSONL e manifesto em `data/prepared/`. Preços de R$ 19,90 a R$ 149,90 e estoques de 5 a 50 unidades são fictícios, calculados pelo SHA-256 do ISBN. A regra e os hashes das entradas ficam no manifesto. Identificadores duplicados ou preferências fora do catálogo interrompem a preparação antes de substituir os arquivos existentes.
 
-Não há conexões, índices efetivamente criados, autenticação, telas Streamlit ou recomendação Cypher executável. Esta etapa fornece os contratos e os dados preparados para essas funcionalidades.
+`python -m src.bootstrap --prepare --check-idempotence` prepara e carrega os dados, cria índices/constraints, testa as conexões e o TTL do Redis e repete a carga para verificar contagens estáveis. Preço, estoque e moeda são definidos apenas na inserção; os demais metadados bibliográficos podem ser atualizados. Clientes existentes não são sobrescritos. O e-mail de clientes novos é normalizado com `strip().lower()` e possui índice único. Pedidos não são importados pela carga inicial.
+
+A verificação confere todos os IDs preparados no MongoDB e Neo4j, assim como cada relação esperada no grafo. Registros adicionais da aplicação são permitidos. A carga não remove dados ausentes da nova entrada e não executa uma transação distribuída. Uma carga interrompida pode ser repetida. Mudanças futuras de preferências deverão ser tratadas pelo serviço da aplicação.
+
+Ainda não há autenticação de clientes, serviços de catálogo/carrinho/checkout, telas Streamlit ou recomendação Cypher. As credenciais existentes são para conexão técnica com os bancos.

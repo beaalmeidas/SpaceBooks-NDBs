@@ -221,3 +221,6 @@ __marimo__/
 
 # Reproducible output from python -m src.prepare_data
 data/prepared/
+
+# Machine-specific public trust bundles and local tools
+.local/
