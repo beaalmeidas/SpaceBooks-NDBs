@@ -8,7 +8,7 @@ from pymongo import UpdateOne
 
 from src.database.clients import connect
 from src.database.config import Settings
-from src.database.seed import PreparedData, book_update, load, totals, verify
+from src.database.seed import PreparedData, book_update, commerce_snapshot, load, totals, verify, verify_schema
 from src.prepare_data import ROOT
 
 
@@ -18,12 +18,19 @@ class DatabaseIntegrationTests(unittest.TestCase):
         data = PreparedData.read(ROOT / "data/prepared")
         with connect(Settings.from_env()) as connections:
             self.assertEqual(connections.health()["redis"], "ok")
+            generation_before = connections.redis.get("catalog:v1:generation")
             load(connections, data)
+            self.assertNotEqual(connections.redis.get("catalog:v1:generation"), generation_before)
             expected = verify(connections, data)
+            self.assertEqual(verify_schema(connections)["neo4j_unique_ids"], ["Cliente", "Produto", "Categoria"])
             before = totals(connections)
+            commerce_before = commerce_snapshot(connections)
+            generation_before = connections.redis.get("catalog:v1:generation")
             load(connections, data)
+            self.assertNotEqual(connections.redis.get("catalog:v1:generation"), generation_before)
             self.assertEqual(verify(connections, data), expected)
             self.assertEqual(totals(connections), before)
+            self.assertEqual(commerce_snapshot(connections), commerce_before)
 
     def test_real_mongodb_upsert_preserves_live_price_and_stock(self):
         identifier = f"integration:{uuid4().hex}"

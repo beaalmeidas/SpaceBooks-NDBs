@@ -47,6 +47,26 @@ services:
       timeout: 10s
       retries: 30
       start_period: 30s
+  catalog:
+    build:
+      context: .
+      args:
+        REQUIREMENTS_FILE: requirements-app.txt
+    profiles: ["app"]
+    command: ["python", "-m", "streamlit", "run", "src/catalogo.py", "--server.address=0.0.0.0", "--server.headless=true", "--browser.gatherUsageStats=false"]
+    environment:
+      MONGO_URI: mongodb://${MONGO_USERNAME:-spacebooks}:${MONGO_PASSWORD}@mongodb:27017/?authSource=admin
+      MONGO_DATABASE: ${MONGO_DATABASE:-spacebooks}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CATALOG_CACHE_TTL_SECONDS: ${CATALOG_CACHE_TTL_SECONDS:-60}
+      REDIS_CACHE_TIMEOUT_SECONDS: ${REDIS_CACHE_TIMEOUT_SECONDS:-0.25}
+      DB_TIMEOUT_SECONDS: ${DB_TIMEOUT_SECONDS:-10}
+      DB_QUERY_TIMEOUT_SECONDS: ${DB_QUERY_TIMEOUT_SECONDS:-60}
+    ports:
+      - "127.0.0.1:${STREAMLIT_PORT:-8501}:8501"
+    depends_on:
+      mongodb:
+        condition: service_healthy
   tools:
     build: .
     profiles: ["tools"]

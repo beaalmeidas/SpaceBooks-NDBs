@@ -8,6 +8,7 @@ from pathlib import Path
 from pymongo import ASCENDING, DESCENDING, TEXT, UpdateOne
 
 from .clients import DatabaseError, operation
+from src.services.catalog_cache import CatalogInvalidator, RedisCatalogCache
 
 
 LABELS = ("Cliente", "Produto", "Categoria")
@@ -121,6 +122,20 @@ def create_schema(connections):
 
 def load(connections, data: PreparedData):
     create_schema(connections)
+    invalidator = CatalogInvalidator(connections.db.catalog_cache_state, RedisCatalogCache(connections.redis))
+    with operation("MongoDB", "cache invalidation intent"):
+        invalidator.mark()
+    try:
+        _load_data(connections, data)
+    finally:
+        # Readers may have retried the initial intent while this load was running.
+        # Renew it after the last write, including partial failures.
+        with operation("MongoDB", "final cache invalidation intent"):
+            invalidator.mark()
+        invalidator.flush()
+
+
+def _load_data(connections, data: PreparedData):
     with operation("MongoDB", "seed upserts"):
         for batch in batches(data.books):
             connections.db.books.bulk_write([
@@ -187,3 +202,54 @@ def totals(connections) -> dict:
     result["graph_nodes"] = connections.query("MATCH (n) RETURN count(n) AS count")[0]["count"]
     result["graph_relationships"] = connections.query("MATCH ()-[r]->() RETURN count(r) AS count")[0]["count"]
     return result
+
+
+def commerce_snapshot(connections) -> dict:
+    """Capture live commercial values without logging document contents."""
+    with operation("MongoDB", "commercial value verification"):
+        return {
+            row["_id"]: {key: row[key] for key in ("price_cents", "stock", "currency") if key in row}
+            for row in connections.db.books.find({}, {"price_cents": 1, "stock": 1, "currency": 1})
+        }
+
+
+def verify_schema(connections) -> dict:
+    """Read actual database metadata; never silently recreate missing indexes."""
+    indexes_by_collection = {}
+    with operation("MongoDB", "schema verification"):
+        collections = set(connections.db.list_collection_names())
+        for name in ("books", "customers", "orders"):
+            if name not in collections:
+                raise DatabaseError(f"MongoDB: missing collection {name}")
+            indexes = {index["name"]: index for index in connections.db[name].list_indexes()}
+            if list(indexes.get("_id_", {}).get("key", {}).items()) != [("_id", 1)]:
+                raise DatabaseError(f"MongoDB: invalid _id index in {name}")
+            indexes_by_collection[name] = indexes
+        required = (
+            ("books", "book_categories", [("categories", 1)], False),
+            ("books", "book_authors", [("authors", 1)], False),
+            ("customers", "customer_email", [("email", 1)], True),
+            ("orders", "customer_history", [("customer_id", 1), ("created_at", -1)], False),
+        )
+        for collection, name, keys, unique in required:
+            index = indexes_by_collection[collection].get(name, {})
+            if list(index.get("key", {}).items()) != keys or bool(index.get("unique", False)) != unique:
+                raise DatabaseError(f"MongoDB: missing or incompatible index {collection}.{name}")
+        search = indexes_by_collection["books"].get("book_search", {})
+        if dict(search.get("key", {})) != {"_fts": "text", "_ftsx": 1} or dict(search.get("weights", {})) != {"title": 1, "authors": 1}:
+            raise DatabaseError("MongoDB: missing or incompatible books.book_search index")
+    constraints = connections.query(
+        "SHOW CONSTRAINTS YIELD name, type, entityType, labelsOrTypes, properties "
+        "RETURN name, type, entityType, labelsOrTypes, properties"
+    )
+    for label in LABELS:
+        if not any(
+            row["type"] in ("UNIQUENESS", "NODE_PROPERTY_UNIQUENESS")
+            and row["entityType"] == "NODE" and list(row["labelsOrTypes"]) == [label]
+            and list(row["properties"]) == ["id"] for row in constraints
+        ):
+            raise DatabaseError(f"Neo4j: missing uniqueness constraint for {label}.id")
+    return {
+        "mongodb": {collection: sorted(indexes) for collection, indexes in indexes_by_collection.items()},
+        "neo4j_unique_ids": list(LABELS),
+    }

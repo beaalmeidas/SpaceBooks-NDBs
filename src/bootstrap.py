@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .database.clients import DatabaseError, connect
 from .database.config import Settings
-from .database.seed import PreparedData, load, totals, verify
+from .database.seed import PreparedData, commerce_snapshot, load, totals, verify, verify_schema
 from .prepare_data import ROOT, prepare
 
 
@@ -28,18 +28,27 @@ def main() -> None:
         with connect(settings) as connections:
             print("Checking database connections and Redis expiration...", file=sys.stderr, flush=True)
             health = connections.health()
+            original_commerce = commerce_snapshot(connections) if args.check_idempotence else {}
             if not args.verify_only:
                 print("Creating indexes and loading seed data...", file=sys.stderr, flush=True)
                 load(connections, data)
-            print("Verifying prepared identifiers and graph relationships...", file=sys.stderr, flush=True)
+            print("Verifying indexes, constraints, identifiers and graph relationships...", file=sys.stderr, flush=True)
+            schema = verify_schema(connections)
             report = verify(connections, data)
             if args.check_idempotence:
                 print("Repeating the load to check idempotence...", file=sys.stderr, flush=True)
                 before = totals(connections)
+                commerce_before_repeat = commerce_snapshot(connections)
+                if any(commerce_before_repeat.get(key) != value for key, value in original_commerce.items()):
+                    raise DatabaseError("Initial load changed existing commercial values")
                 load(connections, data)
                 if totals(connections) != before or verify(connections, data) != report:
                     raise DatabaseError("Idempotence check failed: counts changed after second load")
-            print(json.dumps({"health": health, "seed": report, "idempotence_checked": args.check_idempotence}, indent=2))
+                if commerce_snapshot(connections) != commerce_before_repeat:
+                    raise DatabaseError("Idempotence check failed: commercial values changed after second load")
+            print(json.dumps({"health": health, "schema": schema, "seed": report,
+                              "idempotence_checked": args.check_idempotence,
+                              "commerce_preservation_checked": args.check_idempotence}, indent=2))
     except DatabaseError as error:
         parser.exit(1, f"{error}\n")
     except (ValueError, OSError, KeyError, TypeError) as error:

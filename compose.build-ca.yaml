@@ -1,5 +1,9 @@
 # Optional host trust bundle for networks with a locally trusted TLS proxy.
 services:
+  catalog:
+    build:
+      secrets:
+        - pip_ca
   tools:
     build:
       secrets:

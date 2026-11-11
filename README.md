@@ -1,7 +1,75 @@
 # SpaceBooks-NDBs
 E-commerce de livros e sistema de recomendação. Projeto final da disciplina de Implementação e Gestão de Bancos de Dados NoSQL, Ciência da Computação 26.2.
 
-O projeto possui modelos de domínio, preparação do catálogo, conexões com MongoDB, Redis e Neo4j e carga inicial idempotente. A interface Streamlit e os serviços de catálogo, carrinho e checkout ainda serão implementados.
+O projeto possui modelos de domínio, preparação do catálogo, conexões com MongoDB, Redis e Neo4j, carga inicial idempotente e catálogo Streamlit integrado ao MongoDB com cache Redis. Sessões, carrinho, recomendações e checkout ainda serão implementados.
+
+## Catálogo com MongoDB
+
+Com a carga inicial já executada, instale as dependências da interface e inicie o catálogo na raiz do repositório:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-app.txt
+.\.venv\Scripts\python.exe -m streamlit run src/catalogo.py
+```
+
+Abra `http://localhost:8501`. A tela usa `CachedCatalogService` para busca literal por título ou autor, filtro por categoria, ordenação por título/preço e páginas de 24 livros. Em um acerto de cache, a resposta vem do Redis; em ausência, expiração ou falha do Redis, `MongoCatalogService` consulta `books`. Preço e estoque têm origem nos documentos cadastrados. Clique em **Atualizar catálogo** após editar um livro no Compass para invalidar imediatamente o cache. Sem invalidação, as entradas expiram pelo TTL. `st.cache_resource` compartilha apenas clientes/serviços; os resultados são armazenados no Redis.
+
+Também é possível executar a interface no Docker:
+
+```powershell
+docker compose --profile app up -d --build catalog
+```
+
+Em redes com o erro TLS de build já descrito neste README, use o bundle exportado:
+
+```powershell
+docker compose -f compose.yaml -f compose.build-ca.yaml --profile app up -d --build catalog
+```
+
+O serviço `catalog` depende apenas do MongoDB e usa `requirements-app.txt`. O Python local lê as variáveis MongoDB do `.env` sem exigir credenciais Redis/Neo4j; o Compose usa o endereço interno do serviço. `STREAMLIT_PORT` permite trocar a porta publicada.
+
+## Cache do catálogo no Redis
+
+Inicie o Redis para habilitar o cache; ele continua sendo opcional para a navegação:
+
+```powershell
+docker compose up -d --wait mongodb redis
+```
+
+As buscas paginadas, detalhes dos livros e categorias usam JSON com TTL padrão de 60 segundos. Configure `CATALOG_CACHE_TTL_SECONDS` (1–3600 s) e `REDIS_CACHE_TIMEOUT_SECONDS` (0–5 s, maior que zero; padrão 0,25 s) no `.env` e reinicie o catálogo para aplicar. O cliente de cache não faz tentativas automáticas após falhas, permitindo consultar o MongoDB rapidamente. `REDIS_URL` tem prioridade sobre `REDIS_PASSWORD` e `REDIS_PORT`; sem configuração Redis válida, o catálogo usa somente MongoDB.
+
+Chaves: `catalog:v1:generation`, `catalog:v1:{generation}:search:{digest}`, `catalog:v1:{generation}:categories` e `product:v1:{generation}:{isbn}`. O digest considera pesquisa normalizada, categoria, ordenação, página e tamanho da página. Cada ambiente/conjunto de dados deve usar seu próprio banco lógico Redis (`REDIS_URL`), evitando compartilhar essas chaves entre catálogos diferentes.
+
+A invalidação troca a geração, sem apagar sessões/carrinhos ou executar `FLUSHDB`. A carga inicial invalida automaticamente, inclusive quando termina com erro parcial. O botão **Atualizar catálogo** usa a mesma rotina. Para edições externas pelo Compass, também é possível invalidar pela linha de comando:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.invalidate_catalog_cache
+# Retomar uma invalidação pendente depois de restabelecer o Redis:
+.\.venv\Scripts\python.exe -m src.invalidate_catalog_cache --retry-only
+```
+
+Com a interface em Docker, o equivalente é `docker compose exec -T catalog python -m src.invalidate_catalog_cache`. Uma falha Redis mantém a intenção no MongoDB, na coleção `catalog_cache_state`. A retomada acontece em uma ausência de cache, após recuperação percebida pelo mesmo serviço ou pelo comando acima. Uma instância que não percebeu a falha pode servir entradas antigas até o TTL. Novos serviços que alterarem preço, estoque ou metadados devem chamar `CatalogInvalidator.invalidate()` após persistir a alteração; o checkout ainda será implementado.
+
+Para executar os testes de cache com os bancos reais:
+
+```powershell
+$env:SPACEBOOKS_INTEGRATION = "1"
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_catalog_cache*.py" -v
+Remove-Item Env:SPACEBOOKS_INTEGRATION
+```
+
+Os testes cobrem acertos, ausência de cache, expiração real, invalidação, dados corrompidos, recuperação após indisponibilidade e concorrência. Usam coleções e chaves temporárias próprias. No RedisInsight, explore `catalog:v1:*` e `product:v1:*` e consulte `TTL <chave>`; a leitura não renova a expiração.
+
+Testes da interface e do serviço (instale `requirements-app.txt` primeiro):
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+$env:SPACEBOOKS_INTEGRATION = "1"
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_catalog*.py" -v
+Remove-Item Env:SPACEBOOKS_INTEGRATION
+```
+
+Os testes de integração do catálogo criam uma coleção temporária própria e a removem ao terminar. Eles verificam busca, paginação, filtros e atualização de preço/estoque na interface sem alterar os livros da aplicação. Veja [o registro das mudanças do catálogo](docs/data-model.md#integração-do-catálogo-com-mongodb).
 
 ## Bancos locais com Docker
 
@@ -24,6 +92,8 @@ A carga cria índices no MongoDB, incluindo e-mail único normalizado, busca tex
 Executar a carga novamente atualiza metadados bibliográficos, mas **preserva preço, estoque e moeda existentes**. Clientes existentes também são preservados. Os relacionamentos iniciais usam `MERGE`: repetir a carga não cria duplicatas. A carga é aditiva, não remove registros ou preferências antigos e não é uma transação distribuída. Em caso de interrupção entre bancos, corrija a causa e execute novamente.
 
 Para verificar sem carregar dados ou apenas testar conexões:
+
+`--verify-only` também inspeciona as coleções, as definições dos índices MongoDB e as constraints de unicidade do Neo4j, sem recriá-los. `--check-idempotence` compara as contagens e os valores de preço, estoque e moeda antes/depois da repetição; também confere que a primeira carga preservou os valores comerciais já existentes.
 
 ```powershell
 docker compose --profile tools run --rm tools python -m src.bootstrap --verify-only
@@ -105,6 +175,11 @@ Preços de R$ 19,90 a R$ 149,90 e estoques de 5 a 50 unidades são gerados a par
 | --- | --- |
 | `src/domain/models.py` | Modelos e regras de domínio |
 | `src/prepare_data.py` | Conversão e validação dos CSVs |
+| `src/services/catalog.py` | Consulta paginada ao MongoDB, independente da interface |
+| `src/services/cached_catalog.py` | Cache de buscas, detalhes e categorias com fallback MongoDB |
+| `src/services/catalog_cache.py` | Primitivas Redis e invalidação compartilhada |
+| `src/invalidate_catalog_cache.py` | Invalidação manual e retomada de pendências |
+| `src/catalogo.py` | Catálogo Streamlit com busca, filtros e preço/estoque atuais |
 | `src/database/` | Configuração, conexões, índices, carga e verificação |
 | `src/bootstrap.py` | Inicialização e validação dos bancos |
 | `src/check_connections.py` | Diagnóstico das conexões e TTL do Redis |
@@ -112,4 +187,4 @@ Preços de R$ 19,90 a R$ 149,90 e estoques de 5 a 50 unidades são gerados a par
 | `tests/` | Testes de domínio e preparação |
 | `docs/data-model.md` | Contratos dos dados e dos bancos |
 
-Consulte [a modelagem dos dados](docs/data-model.md) para os campos, identificadores, regras do checkout e responsabilidades de cada banco.
+Consulte [a modelagem e os contratos compartilhados](docs/data-model.md) para os campos, identificadores, chaves Redis, TTLs, sessões, regras do checkout e responsabilidades de cada banco. As interfaces Python dos futuros serviços estão em `src/domain/contracts.py`; são contratos, sem implementação dos serviços.

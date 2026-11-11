@@ -3,14 +3,47 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from src.database.clients import DatabaseError, operation
 from src.database.config import Settings
-from src.database.seed import PreparedData, book_update
+from src.database.seed import PreparedData, book_update, verify_schema
 
 
 class DatabaseUnitTests(unittest.TestCase):
+    def schema_connections(self):
+        connections = MagicMock()
+        connections.db.list_collection_names.return_value = ["books", "customers", "orders"]
+        collections = {name: MagicMock() for name in ("books", "customers", "orders")}
+        connections.db.__getitem__.side_effect = collections.__getitem__
+        indexes = {
+            "books": [{"name": "book_search", "key": {"_fts": "text", "_ftsx": 1}, "weights": {"title": 1, "authors": 1}},
+                      {"name": "book_categories", "key": {"categories": 1}},
+                      {"name": "book_authors", "key": {"authors": 1}}],
+            "customers": [{"name": "customer_email", "key": {"email": 1}, "unique": True}],
+            "orders": [{"name": "customer_history", "key": {"customer_id": 1, "created_at": -1}}],
+        }
+        for collection, definitions in indexes.items():
+            connections.db[collection].list_indexes.return_value = [{"name": "_id_", "key": {"_id": 1}}, *definitions]
+        connections.query.return_value = [
+            {"type": "UNIQUENESS", "entityType": "NODE", "labelsOrTypes": [label], "properties": ["id"]}
+            for label in ("Cliente", "Produto", "Categoria")
+        ]
+        return connections
+
+    def test_schema_verification_rejects_email_index_without_uniqueness(self):
+        connections = self.schema_connections()
+        connections.db["customers"].list_indexes.return_value[1]["unique"] = False
+        with self.assertRaisesRegex(DatabaseError, "customer_email"):
+            verify_schema(connections)
+        connections.db["customers"].create_index.assert_not_called()
+
+    def test_schema_verification_rejects_constraint_on_wrong_property(self):
+        connections = self.schema_connections()
+        connections.query.return_value[0]["properties"] = ["name"]
+        with self.assertRaisesRegex(DatabaseError, "Cliente.id"):
+            verify_schema(connections)
+
     def test_settings_encode_credentials_and_do_not_print_secrets(self):
         environment = {"MONGO_PASSWORD": "m@/secret", "REDIS_PASSWORD": "r@/secret", "NEO4J_PASSWORD": "n-secret"}
         with patch.dict(os.environ, environment, clear=True), patch("src.database.config.load_dotenv"):
