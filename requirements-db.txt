@@ -1,4 +1,4 @@
-# Database runtime, independent of the existing notebook/development environment.
+# Database clients and environment loading; no UI or notebook packages.
 pymongo>=4.10,<5
 redis>=5.2,<7
 neo4j>=5.26,<6

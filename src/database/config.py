@@ -29,6 +29,26 @@ class RedisCacheSettings:
 
 
 @dataclass(frozen=True)
+class RedisSessionSettings:
+    redis_url: str = field(repr=False)
+    timeout_seconds: float = 1
+
+    @classmethod
+    def from_env(cls) -> "RedisSessionSettings":
+        load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
+        url = os.environ.get("REDIS_URL")
+        if not url:
+            password = os.environ.get("REDIS_PASSWORD", "")
+            if not password or password.startswith("CHANGE_ME_"):
+                raise ValueError("Configure Redis for sessions")
+            url = f"redis://:{quote(password, safe='')}@localhost:{os.environ.get('REDIS_PORT', '6379')}/0"
+        timeout = float(os.environ.get("REDIS_SESSION_TIMEOUT_SECONDS", "1"))
+        if not 0 < timeout <= 5:
+            raise ValueError("Invalid Redis session timeout")
+        return cls(url, timeout)
+
+
+@dataclass(frozen=True)
 class MongoSettings:
     """Mongo-only settings, so the catalog does not require Redis or Neo4j."""
 
@@ -46,7 +66,7 @@ class MongoSettings:
             if not password or password.startswith("CHANGE_ME_"):
                 raise ValueError("Configure MONGO_PASSWORD")
             user = quote(os.environ.get("MONGO_USERNAME", "spacebooks"), safe="")
-            uri = f"mongodb://{user}:{quote(password, safe='')}@localhost:{os.environ.get('MONGO_PORT', '27017')}/?authSource=admin"
+            uri = f"mongodb://{user}:{quote(password, safe='')}@localhost:{os.environ.get('MONGO_PORT', '27017')}/?authSource=admin&directConnection=true"
         timeout = float(os.environ.get("DB_TIMEOUT_SECONDS", "10"))
         query_timeout = float(os.environ.get("DB_QUERY_TIMEOUT_SECONDS", "60"))
         if not 0 < timeout <= 120 or not 0 < query_timeout <= 120:
@@ -86,7 +106,7 @@ class Settings:
         return cls(
             mongo_uri=mongo.mongo_uri, mongo_database=mongo.mongo_database,
             redis_url=redis_url,
-            neo4j_uri=os.environ.get("NEO4J_URI", f"bolt://localhost:{os.environ.get('NEO4J_BOLT_PORT', '7687')}"),
+            neo4j_uri=os.environ.get("NEO4J_URI", f"bolt://127.0.0.1:{os.environ.get('NEO4J_BOLT_PORT', '7687')}"),
             neo4j_username=os.environ.get("NEO4J_USERNAME", "neo4j"),
             neo4j_password=required("NEO4J_PASSWORD"),
             neo4j_database=os.environ.get("NEO4J_DATABASE", "neo4j"), timeout_seconds=mongo.timeout_seconds,

@@ -151,8 +151,11 @@ activemq-data/
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
+.venv-*/
 env/
 venv/
 ENV/
@@ -224,3 +227,14 @@ data/prepared/
 
 # Machine-specific public trust bundles and local tools
 .local/
+
+# Local credentials, certificates and editor/agent configuration
+*.pem
+*.key
+*.p12
+*.pfx
+.vscode/
+.idea/
+.agents/
+.codex/
+.aws/

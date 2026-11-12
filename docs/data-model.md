@@ -1,6 +1,6 @@
 # Modelagem dos dados do SpaceBooks
 
-Os modelos em `src/domain/models.py` são entidades imutáveis: alterações criam novas instâncias. Suas projeções retornam dicionários. As conexões e a carga inicial estão em `src/database/`; o catálogo consulta MongoDB por `src/services/catalog.py`. Ainda não há serviços de checkout ou sincronização de compras entre bancos.
+Os modelos em `src/domain/models.py` são entidades imutáveis: alterações criam novas instâncias. Suas projeções retornam dicionários. As conexões e a carga inicial estão em `src/database/`; o catálogo consulta MongoDB por `src/services/catalog.py`. Checkout transacional e sincronização recuperável de compras estão em `src/services/checkout.py`.
 
 ## Identificadores e valores
 
@@ -26,17 +26,17 @@ Na importação, páginas iguais a zero tornam-se `null` (quantidade desconhecid
 
 `Order.to_document()` produz `_id`, cliente, itens, total, moeda, data e status para `orders`. Os status previstos são `confirmed` e `cancelled`. Alterar o catálogo não modifica o histórico já criado. O construtor de `Order` permite reconstruir pedidos históricos sem consultar o preço atual.
 
-O método não reserva estoque, não limpa o carrinho e não confirma pagamento. O futuro checkout deve validar o cliente e efetuar a baixa condicional do estoque junto à persistência do pedido. Sincronização com Neo4j e limpeza do Redis precisam de tratamento de falhas e repetição idempotente.
+O método do modelo não reserva estoque, não limpa o carrinho e não confirma pagamento. `MongoCheckoutService` valida o cliente e efetua a baixa condicional do estoque junto à persistência do pedido, em transação. A sincronização Neo4j, a limpeza Redis e a invalidação têm marcadores duráveis e retomada idempotente. Não há integração com pagamento externo.
 
 Índices criados pela carga: `_id` único (nativo do MongoDB) e índice composto de `customer_id` e `created_at` para histórico.
 
 ## Carrinho no Redis
 
-`Cart` representa uma chave `cart:{customer_id}`, com Hash de ISBN → quantidade. `to_redis_hash()` retorna o mapeamento para `HSET`. O TTL padrão é 86.400 segundos (24 horas); o futuro adaptador deve executar `EXPIRE` ao salvar ou atualizar o carrinho. O modelo valida o TTL, mas não inicia temporizadores.
+`Cart` representa uma chave `cart:{customer_id}`, com Hash de ISBN → quantidade. `to_redis_hash()` retorna o mapeamento para `HSET`. O TTL padrão é 86.400 segundos (24 horas); `RedisCartService` executa `EXPIRE` nas alterações efetivas do carrinho. O modelo valida o TTL, mas não inicia temporizadores.
 
 O carrinho não armazena preços; o checkout utiliza o catálogo atual. Um carrinho vazio é válido para navegação, mas não gera pedido. A aplicação deve remover a chave Redis quando o último item for excluído.
 
-Os contratos de sessões e cache estão definidos nas seções seguintes. O cache do catálogo está implementado; sessões e carrinhos persistidos ainda não.
+Os contratos de sessões e cache estão definidos nas seções seguintes. Cache do catálogo, sessões e carrinhos persistidos estão implementados.
 
 ## Grafo no Neo4j
 
@@ -71,7 +71,7 @@ A verificação confere todos os IDs preparados no MongoDB e Neo4j, assim como c
 
 Com `--check-idempotence`, o script compara contagens e todos os valores existentes de preço, estoque e moeda antes/depois da carga e de sua repetição. Registros adicionais da aplicação são permitidos. A carga não remove dados ausentes da nova entrada e não executa uma transação distribuída. Uma carga interrompida pode ser repetida. Mudanças futuras de preferências deverão ser tratadas pelo serviço da aplicação.
 
-Ainda não há identificação de clientes por sessão, serviços de carrinho/checkout ou recomendação Cypher. `src/catalogo.py` usa cache Redis e consultas MongoDB pelos serviços de catálogo, conforme os registros de mudanças abaixo. As credenciais existentes são para conexão técnica com os bancos.
+A identificação demonstrativa, o carrinho, o checkout e as avaliações/recomendações Cypher estão implementados. `src/catalogo.py` usa os serviços Python descritos nos registros de mudanças abaixo. As credenciais dos bancos são para conexão técnica, sem login com senha para clientes.
 
 ## Contratos compartilhados dos serviços
 
@@ -137,13 +137,15 @@ Todos os métodos de `CartService` recebem token e resolvem o cliente por `Sessi
 
 Atualizar itens, revisão e expiração de forma atômica. Cada mutação efetiva gera outra revisão; leitura não renova o TTL. Carrinho vazio não mantém as duas chaves e retorna `CartView(revision=None, items=(), total_cents=0)`. Revisão nova não pode reutilizar contador antigo após expiração; usar UUID evita esse conflito.
 
-`add_item(token, book_id, quantity)` incrementa a quantidade existente. `set_quantity(...)` define a quantidade absoluta, exige item existente e quantidade positiva; zero não significa remoção. `remove_item(...)` remove o item e é idempotente se ele já não existir. Adição/alteração valida livro e quantidade resultante contra o estoque atual. Isso não reserva unidades: o checkout precisa revalidar.
+`add_item(token, book_id, quantity)` incrementa a quantidade existente. `set_quantity(...)` define a quantidade absoluta, exige item existente e quantidade positiva (inteiro de 1 até 2.147.483.647); zero não significa remoção. `remove_item(...)` remove o item e é idempotente se ele já não existir. Adição/alteração valida livro e quantidade resultante contra o estoque atual. Isso não reserva unidades: o checkout precisa revalidar.
 
 `get_cart(...)` retorna `CartView` com linhas `CartLine(book, quantity, subtotal_cents)` e total calculados a partir dos preços atuais no MongoDB, sem confiar em preços enviados pela interface. Estoque insuficiente pode aparecer na revisão do carrinho; não reduzir a quantidade silenciosamente. Se um livro tiver sido excluído, retornar `NotFoundError` e permitir removê-lo por ISBN sem precisar carregá-lo. Os dados brutos do carrinho não guardam preço nem total.
 
 ### Checkout e recuperação
 
-`CheckoutService.checkout(token, request_id, expected_revision)` confirma exclusivamente o carrinho/revisão exibidos na tela. Na primeira chamada, validar sessão, cliente, UUID, revisão, itens e estoque. A interface mantém o mesmo `request_id` durante duplo clique, repetição ou resposta perdida; cria outro somente ao iniciar uma nova tentativa. A mesma tentativa não pode gerar dois pedidos ou duas baixas de estoque.
+`CheckoutService.prepare(token, request_id, expected_revision)` valida a sessão, lê o carrinho atual e registra uma revisão imutável em `checkout_attempts`, com os livros, quantidades e preços apresentados. O `_id` é o UUID da tentativa; `created_at` é BSON Date e tem índice TTL de dois dias. Repetir `prepare` com o mesmo ID retorna a revisão registrada, sem aprovar preços novos silenciosamente. Uma nova revisão explícita cria outro UUID. Pedidos confirmados não têm TTL.
+
+`CheckoutService.checkout(token, request_id, expected_revision)` confirma exclusivamente o carrinho/revisão exibidos na tela. Na primeira chamada, validar sessão, cliente, UUID, revisão, itens, preços aprovados e estoque. A interface mantém o mesmo `request_id` durante duplo clique, repetição ou resposta perdida; cria outro somente ao iniciar uma nova tentativa. A mesma tentativa não pode gerar dois pedidos ou duas baixas de estoque. Além do `_id` único do pedido, o índice parcial único `one_order_per_cart_revision` em cliente + revisão impede duplicar a compra do mesmo carrinho usando outro identificador.
 
 Antes de conferir novamente o carrinho, procurar um pedido já confirmado para `request_id`. Se pertencer ao mesmo cliente, retornar seu resultado persistido, mesmo que o carrinho já tenha sido limpo. Se pertencer a outro cliente, responder `NotFoundError`. Para tentativa ainda não confirmada, revisão diferente gera `ConflictError` e exige revisão da compra na interface.
 
@@ -160,9 +162,9 @@ O pedido guarda os campos já definidos por `Order.to_document()`. A implementa�
 }
 ```
 
-Esses são campos reservados para o checkout, ainda não adicionados ao modelo nem à persistência. `CheckoutResult` retorna o pedido e os três estados `pending`/`done`. Pedido confirmado com integração pendente continua confirmado; a interface deve informar a pendência e apresentar o mesmo número de pedido, sem solicitar outra compra.
+Esses campos são persistidos pelo serviço de checkout. `CheckoutResult` retorna o pedido, os três estados `pending`/`done` e `cart_cleanup` (`pending`, `cleared`, `already_absent` ou `preserved`), também persistido em `integration`. Pedido confirmado com integração pendente continua confirmado; a interface informa a pendência e apresenta o mesmo número de pedido, sem solicitar outra compra.
 
-Baixa de estoque, pedido e pendências devem ser persistidos de forma consistente no MongoDB. A decisão para a implementação é usar transação MongoDB, com baixa condicional de cada estoque e `_id` único do pedido. **Antes de implementar essa operação, o ambiente local deverá ser configurado como replica set**; o Compose atual é standalone. Não considerar várias escritas independentes como transação. Esta etapa de contratos não altera a infraestrutura.
+Baixa de estoque, pedido e pendências são persistidos na mesma transação MongoDB, com leitura `snapshot` no primário, write concern `majority`, baixa condicional de cada estoque e `_id` único do pedido. O Compose configura o replica set local `rs0`, de um nó, com chave interna em volume separado e inicializador idempotente. O volume de dados anterior é preservado. A conexão local usa `directConnection=true` para não depender da resolução do hostname interno Docker. Não há alternativa de checkout com várias escritas independentes em standalone.
 
 Depois da confirmação MongoDB, registrar `COMPROU`, limpar o carrinho confirmado e invalidar cache, marcando cada etapa como concluída somente após sucesso. Comparar e limpar carrinho/revisão atomicamente. Se o cliente tiver modificado o carrinho depois da confirmação, preservar o carrinho atual, marcar a limpeza como resolvida e informar que ele não foi limpo por ter alterações novas. Não remover indiscriminadamente itens de uma revisão diferente.
 
@@ -172,13 +174,13 @@ Cancelamento e pagamento externo não integram o fluxo inicial. `cancelled` perm
 
 ### Recomendações e avaliações
 
-`RecommendationService.recommend(token, limit=10)` resolve o cliente e retorna até 50 recomendações, validando limite entre 1 e 50. Cada `Recommendation` contém `book`, pontuação finita não negativa e motivo `similar_customers` ou `preferences`. Ordenar por pontuação decrescente e ISBN crescente no desempate; não retornar livros duplicados, já comprados, excluídos ou sem estoque.
+`RecommendationService.recommend(token, limit=10)` resolve o cliente e retorna até 50 recomendações, validando limite entre 1 e 50. Cada `Recommendation` contém `book`, pontuação finita positiva e motivo `similar_customers` ou `preferences`. Primeiro retornar o grupo de similaridade, depois completar por preferências; ordenar cada grupo por pontuação decrescente e ISBN crescente no desempate. Não retornar livros duplicados, já comprados, já avaliados pelo próprio cliente, excluídos ou sem estoque.
 
 Usar histórico de compras e avaliações positivas (notas 4 ou 5) para localizar clientes semelhantes no Neo4j. Priorizar livros por quantidade de clientes semelhantes distintos que os compraram ou avaliaram positivamente, contando cada cliente uma vez por candidato. Essa contagem é a pontuação de similaridade. Se não houver candidatos suficientes, completar por categorias/autores favoritos: pontuar por número de categorias mais número de autores favoritos distintos que coincidam com o livro. Não incluir candidatos com pontuação zero. Preferências de autores continuam disponíveis no MongoDB, sem exigir novos nós no grafo.
 
 Consultar MongoDB para obter os dados comerciais atuais dos candidatos. Nenhuma recomendação é um resultado válido. Neo4j indisponível pode usar a alternativa por preferências, mas deve retornar `ServiceUnavailableError` se não for possível determinar o histórico necessário para excluir livros comprados; não fingir que houve personalização por similaridade.
 
-`submit_review(token, book_id, rating)` valida sessão, livro e nota inteira de 1 a 5; retorna `Review`. Uma avaliação atual por cliente/livro: nova submissão atualiza nota e data. Não exigir compra prévia nesta versão. Avaliações individuais não sobrescrevem a média agregada importada do catálogo.
+`submit_review(token, book_id, rating)` valida sessão, livro e nota inteira de 1 a 5; retorna `Review`. Uma avaliação atual por cliente/livro: nova submissão atualiza nota e data. `get_review(token, book_id)` devolve a avaliação do cliente identificado ou `None`. Não exigir compra prévia nesta versão. Avaliações individuais não sobrescrevem a média agregada importada do catálogo.
 
 No grafo, preservar as propriedades existentes. Identidade de `COMPROU`: cliente + produto + `pedido_id`; identidade de `AVALIOU`: cliente + produto. Repetir o registro de compra usa a quantidade original do pedido, sem incrementar novamente. Não criar novas grafias como `COMPROU_LIVRO` ou `AVALIACAO`.
 
@@ -197,7 +199,7 @@ Todos derivam de `ServiceError`. Os adaptadores traduzem exceções dos drivers 
 
 ### Critério de conclusão dos contratos
 
-Cada implementação deve respeitar as assinaturas de `src/domain/contracts.py`, os nomes/formatos aqui definidos e testar suas regras de autorização, expiração, invalidação e repetição. Alterar assinatura, chave, identidade ou semântica exige atualizar este documento e todos os consumidores afetados no mesmo trabalho. O catálogo MongoDB já implementa a interface; os demais serviços continuam como contratos.
+Cada implementação deve respeitar as assinaturas de `src/domain/contracts.py`, os nomes/formatos aqui definidos e testar suas regras de autorização, expiração, invalidação e repetição. Alterar assinatura, chave, identidade ou semântica exige atualizar este documento e todos os consumidores afetados no mesmo trabalho. Catálogo, sessões, carrinho, checkout e avaliações/recomendações implementam suas interfaces.
 
 ## Integração do catálogo com MongoDB
 
@@ -236,3 +238,94 @@ No Streamlit, o botão de atualização invalida antes de carregar categorias e 
 Testes unitários e de integração cobrem chaves por todos os parâmetros, consultas sem cache, acertos, TTL sem renovação, expiração real, invalidação de buscas/detalhes/categorias, falhas de leitura/escrita Redis, JSON/metadados inválidos, retomada de pendência e invalidações concorrentes. Coleções e chaves de teste são isoladas e removidas ao terminar. As dependências já existentes em `requirements-db.txt` são suficientes para esta etapa.
 
 Validação final da etapa 4: 50 testes passaram com `SPACEBOOKS_INTEGRATION=1`, incluindo os testes da interface com Redis real.
+
+## Implementação da identificação e das sessões
+
+Etapa 5 implementada em 11 de novembro de 2026, mantendo a decisão de identificação demonstrativa sem senha. `RedisSessionService` em `src/services/sessions.py` implementa o contrato de sessões e acrescenta `list_customers(search="")`: busca literal por nome/ID, no máximo 50 cadastros, ordenados por nome e `_id`. A interface exige uma busca explícita antes da seleção. A criação revalida o cadastro no MongoDB, independentemente dos candidatos anteriormente exibidos.
+
+Tokens são gerados com `secrets.token_urlsafe(32)` e nunca persistidos em texto original. O serviço grava o JSON na chave com SHA-256 usando `SET NX EX 28800`, evitando sobrescrever outra sessão. A resolução confere o token, o conteúdo e as datas da sessão, sem renovar a validade; consulta o cliente atual no MongoDB e revoga a sessão se o cadastro foi removido. Dados inválidos e falhas das dependências não autorizam acesso. Logout usa exclusão da chave individual, sem apagar carrinhos ou outras sessões.
+
+`src/session_ui.py` concentra conexões compartilhadas e identidade isolada por navegador. `current_customer()` devolve o `Customer` recém-validado ou `None` quando não há token; falhas são `ServiceError`. `render_identity()` apresenta busca, seleção, cliente atual, troca e saída. Os callbacks limpam todo o estado local antes de instalar outro token, incluindo filtros e futuros dados de carrinho/checkout. Expiração ou falha ao validar também descarta o estado local, mantendo a navegação pública disponível. Se a revogação remota falhar ao sair, a tela avisa e continua sem identidade local; o registro Redis restante depende da expiração. Fechar/recarregar o navegador não revoga automaticamente um token perdido.
+
+Para outras telas, use o DTO validado para apresentação e o token da chave `TOKEN_KEY` para chamar serviços protegidos. Cada operação protegida deve resolver novamente a sessão; não confiar em um `customer_id` vindo da interface nem manter identidade em `st.cache_resource`. A configuração de sessões (`RedisSessionSettings`) exige Redis, tem timeout próprio de 1 segundo e não depende do TTL do cache ou do Neo4j. Nenhuma dependência adicional foi necessária.
+
+Validação: passaram os 20 testes de sessões e as verificações de regressão do catálogo, cache, domínio, preparação e bancos. Os testes de sessões cobrem configuração independente do cache, isolamento, troca, saída, expiração fixa/real, cadastros removidos, dados inválidos e falhas sem vazamento de credenciais. O fluxo de dois navegadores AppTest também usa MongoDB/Redis reais. Coleções e chaves temporárias são removidas ao terminar. O container atualizado passou na verificação HTTP 200 e no fluxo de identificação de dois clientes da carga inicial, com logout e remoção dos tokens criados na verificação.
+
+## Implementação do carrinho Redis
+
+Etapa 6 implementada em 11 de novembro de 2026. `RedisCartService` em `src/services/cart.py` implementa `CartService` com o cliente sempre obtido pela resolução do token. O serviço usa um `MongoCatalogService` direto, sem cache de produto ou preços fornecidos pela tela. `get_cart()` lê itens e revisão em uma transação Redis, ordena as linhas por ISBN e consulta os livros atuais para calcular subtotais e total em centavos. Uma leitura não altera revisão nem TTL.
+
+As mutações observam as duas chaves com `WATCH` e gravam item, revisão UUID e expiração usando `MULTI`/`EXEC`. Adições incrementam a quantidade lida sob observação; alterações concorrentes provocam nova tentativa, com limite de cinco tentativas por operação. Operações sem mudança também validam a observação, mas preservam a revisão e não renovam a expiração. Cada mudança efetiva renova as duas chaves por 86.400 segundos. Remover o último item exclui ambas. A revisão é nova após recriar um carrinho expirado.
+
+Inclusão e alteração validam ISBN, existência do livro, quantidade inteira positiva e estoque resultante. Uma queda posterior de estoque não altera os itens silenciosamente: a visualização mantém a quantidade e a tela avisa. Livros excluídos geram `NotFoundError` com o ISBN; `remove_item()` não precisa consultar o livro excluído e permite recuperá-lo pela remoção. Dados Redis inválidos geram erro de serviço sem substituir o carrinho. Falhas Redis não criam uma alternativa local. Uma resposta de rede perdida pode ocorrer depois da confirmação de escrita; a interface orienta atualizar antes de repetir a alteração. O carrinho não reserva estoque nem registra pedidos.
+
+`src/cart_ui.py` reúne os controles de inclusão e o painel integrado a `src/catalogo.py`: quantidades editáveis com confirmação, remoção, atualização, subtotais, total, estado vazio, aviso de estoque e remoção manual por ISBN. O painel abre após adicionar um livro. Visitantes podem navegar no catálogo, com botões de inclusão desabilitados. Sessões expiradas impedem operações e descartam o estado local; logout e troca preservam os carrinhos no Redis e limpam os rascunhos locais. Conexões são compartilhadas, sem compartilhar `CartView` ou identidade em cache Streamlit.
+
+Os testes de carrinho usam dados temporários para verificar dois clientes, armazenamento bruto sem preços, cálculos, mudança de preço no MongoDB, adições concorrentes, revisões, TTL real, operações sem mudança, estoque, livros excluídos e expiração de sessão. AppTest verifica dois navegadores com persistência real, controles da tela, troca de cliente sem reaproveitar rascunhos e remoção por ISBN. A configuração usa a URL e o timeout das sessões; as dependências existentes são suficientes.
+
+Validação: passaram os 19 testes de carrinho, incluindo a proteção contra repetir uma adição quando o driver transforma perda de conexão em `WatchError`, e as verificações de regressão do catálogo, cache, sessões, domínio, preparação e bancos. O container final foi atualizado e respondeu HTTP 200. A identificação de Lucas e a leitura do painel também foram conferidas com conexões reais, sem alterar os itens do cliente.
+
+## Implementação do checkout e das compras
+
+Etapa 7 implementada em 11 de novembro de 2026. `MongoCheckoutService` separa revisão, confirmação e retomada. A revisão registra um UUID e um snapshot imutável dos preços apresentados em `checkout_attempts`. A confirmação resolve novamente a sessão, consulta o carrinho atual e compara revisão, itens e preços; dentro da transação, revalida o cliente e os livros e baixa cada estoque com condição de quantidade e preço. O pedido guarda os preços e títulos históricos e o total em centavos. A transação também grava os estados pendentes de grafo, carrinho e cache e marca a invalidação em `catalog_cache_state`.
+
+O identificador da tentativa é o `_id` único do pedido. Pedidos existentes são consultados antes de exigir que o carrinho ainda exista; respostas perdidas podem ser recuperadas pelo mesmo identificador. O índice parcial único de cliente/revisão também impede duplicar a compra do mesmo carrinho com outro UUID. Se uma baixa ou a inserção falhar, todas as escritas da transação são desfeitas. Não há pagamento externo ou cancelamento nesta entrega.
+
+Após commit, a projeção Neo4j usa `MERGE` de `COMPROU` por cliente, produto e `pedido_id`, atribuindo os valores históricos em vez de incrementar a quantidade. Uma propriedade temporária de trava no cliente serializa projeções concorrentes; ela é removida na mesma transação Neo4j. A limpeza Redis usa Lua para comparar a revisão e excluir as duas chaves atomicamente. Carrinho ausente encerra a pendência; revisão diferente preserva o carrinho inteiro e retorna `cart_cleanup="preserved"`. O cache usa a intenção persistida junto com a compra para trocar a geração.
+
+Cada integração tem seu marcador atualizado somente depois de sucesso. Falha após a gravação do pedido mantém a compra confirmada; respostas perdidas das integrações permitem repetir o mesmo efeito com segurança. `get_order()` verifica o proprietário e tenta retomar o pedido consultado; `retry_pending()` é interno, percorre pedidos pendentes e não exige uma sessão Redis. A execução é oferecida por `python -m src.retry_checkout --limit 100`, sem agendamento automático. Se o MongoDB falhar durante a atualização de um marcador, o efeito externo pode já ter ocorrido; a próxima retomada continua idempotente.
+
+O Compose migra o MongoDB local para `rs0`, mantendo os dados e acrescentando o volume de configuração que guarda a chave interna. O inicializador espera a conexão autenticada, trata o conjunto ainda não iniciado e aguarda a eleição do primário; pode ser repetido. A conexão Python usa modo direto para funcionar tanto no host quanto na rede Docker. O endereço Neo4j padrão no host passou a `127.0.0.1`, evitando que o prazo curto de conexão seja consumido tentando IPv6 sem serviço disponível.
+
+`src/checkout_ui.py` mostra revisão, confirmação, número do pedido, valores históricos e pendências. Mantém o mesmo UUID ao repetir uma confirmação; uma revisão nova verifica antes se a tentativa anterior já foi confirmada. A consulta manual recupera pedidos do próprio cliente mesmo após perder o estado do navegador e se identificar novamente. Se uma integração falhar logo após a confirmação, a tela apresenta o pedido confirmado sem depender de uma nova execução que exigiria Redis disponível.
+
+Validação: passaram os 107 testes da suíte completa, incluindo 18 testes de checkout. Os cenários incluem rollback de múltiplas baixas, última unidade disputada por dois clientes, envios concorrentes da mesma tentativa, outro UUID para a mesma revisão, preço alterado, sessão expirada, acesso de outro cliente, histórico de preços, respostas perdidas, carrinho alterado após compra e retomada das três integrações por outro trabalhador. O fluxo de revisão e confirmação também passou dentro do container atualizado, com banco, chaves e nós temporários. A configuração real do serviço confirmou MongoDB `rs0`, conexão Neo4j e HTTP 200, sem registrar compras de clientes reais.
+
+As decisões seguem as documentações de [transações PyMongo](https://www.mongodb.com/docs/languages/python/pymongo-driver/current/crud/transactions/) e de [travas e concorrência Neo4j](https://neo4j.com/docs/operations-manual/current/database-internals/concurrent-data-access/). A coordenação após o commit usa pendências duráveis; não constitui uma transação distribuída entre os três bancos.
+
+A inicialização também foi validada em volumes novos de um projeto Docker temporário, sem publicar portas. Esse teste identificou a janela entre o servidor temporário de configuração da imagem e o servidor definitivo; o inicializador agora aguarda a conexão autenticada e concluiu com `Replica set rs0 ready` em uma instalação vazia. O projeto e seus volumes temporários foram removidos, preservando os volumes principais.
+
+## Implementação das avaliações e recomendações
+
+Etapa 8 implementada em 11 de novembro de 2026. `Neo4jRecommendationService` em `src/services/recommendations.py` implementa `get_review`, `submit_review` e `recommend`, sempre resolvendo a sessão antes de consultar dados do cliente. Avaliações validam a existência do livro no MongoDB e notas inteiras entre 1 e 5. A gravação usa `MERGE` de cliente/produto e de uma relação `AVALIOU`, atualizando `nota` e `created_at` em UTC. Uma trava temporária no cliente serializa gravações concorrentes para impedir relações duplicadas. O histórico individual permanece separado da média importada do catálogo.
+
+A recomendação obtém compras confirmadas no MongoDB e compras/avaliações no Neo4j. A união exclui compras cuja projeção ainda está pendente. Livros já avaliados pelo próprio cliente também ficam fora das sugestões, incluindo avaliações negativas. Compras e notas 4/5 formam os sinais positivos. A consulta Cypher encontra outros clientes com sinais positivos nos mesmos produtos e conta clientes distintos que compraram ou avaliaram positivamente cada candidato. Vários pedidos ou avaliações do mesmo vizinho não aumentam sua contribuição para o mesmo livro.
+
+O serviço consulta em lote os candidatos no MongoDB, recuperando os campos de `Book` e filtrando estoque positivo. Livros ausentes não são apresentados. Ordena o grupo de similaridade por pontuação decrescente e ISBN crescente, seleciona até o limite e completa vagas com livros que correspondam às categorias/autores favoritos. A pontuação de preferências soma interseções distintas de categorias e autores; não inclui pontuação zero, duplicatas ou itens excluídos. Essa ordem explicita a prioridade da similaridade sobre a alternativa por preferências. Resultados e preços não usam cache Redis ou `st.cache_data`.
+
+Se a consulta de vizinhos falhar depois de o histórico ser conhecido, a alternativa por preferências continua excluindo os livros comprados/avaliados. Se o Neo4j falhar antes de fornecer o histórico, o serviço retorna erro, pois há compras demonstrativas armazenadas apenas no grafo que não poderiam ser excluídas com certeza. Falhas MongoDB também geram mensagens seguras, sem apresentar preço ou disponibilidade inventados. Limites válidos são inteiros de 1 até 50; a tela solicita seis sugestões.
+
+`src/recommendations_ui.py` apresenta **Recomendações para você**, o motivo de cada sugestão, preço/estoque atuais e inclusão no carrinho. Os botões têm chaves distintas das usadas no catálogo. Dentro de **Ver detalhes**, **Minha avaliação** permite consultar, cadastrar e alterar a nota e mostra a data UTC da última gravação. Os recursos compartilhados contêm somente conexões; notas em edição e opções do painel são privadas da sessão Streamlit e desaparecem após troca/logout. Sessão expirada bloqueia novas operações e descarta esse estado.
+
+`data/recommendation-demo.json` define cinco clientes fictícios `DEMO_REC_*`, quatro compras simuladas e quatro avaliações. `python -m src.seed_recommendation_demo` valida referências e carrega os perfis no MongoDB e as relações no Neo4j, sem criar pedidos ou modificar estoque. Os clientes e relações têm `demo_dataset="recommendations-v1"`; compras simuladas usam `pedido_id` iniciado por `DEMO-REC-`. O comando não altera cadastros reais e recusa IDs já ocupados por outro conjunto. Repetir a carga mantém uma relação por avaliação/compra simulada e reaplica as notas do arquivo. Perfis demonstrativos não são inseridos no CSV original.
+
+Os cenários incluem um leitor de computação com compra em comum com outro perfil, um leitor de ficção com avaliação positiva em comum e um cliente sem histórico com preferências. Os testes usam banco MongoDB, chaves Redis e IDs Neo4j temporários para cobrir perfis sem histórico, compras/avaliações semelhantes, edição e concorrência de notas, pontuação por cliente distinto, autores, empates, limites, preços atuais, estoque, livros excluídos e pedidos com integração pendente. A interface também verifica a inclusão no carrinho, atualização após editar uma nota, isolamento de estado e indisponibilidade segura.
+
+Validação final: os 125 testes da suíte completa passaram, incluindo 18 testes desta etapa. O container foi atualizado e respondeu HTTP 200. A carga dos cinco perfis demonstrativos foi executada duas vezes e manteve quatro compras simuladas e quatro avaliações, sem duplicações e sem alterar preços, estoque ou quantidade de pedidos MongoDB. No ambiente carregado, o perfil de computação recebeu *C++ Programmer's Notebook* e *Java* por similaridade; o perfil de ficção recebeu *Rage of angels* e *Warhost of Vastmark*; o perfil sem histórico recebeu *Java* e *Gilead* por preferências. AppTest também conferiu os painéis com/sem histórico e a leitura da nota fictícia no container, encerrando suas sessões de teste ao terminar.
+
+## Integração da navegação e validação do fluxo completo
+
+Etapa 9: `src/catalogo.py` concentra a identidade visual e o roteamento entre visão geral, catálogo, carrinho, checkout e recomendações. A renderização do catálogo foi extraída para `src/catalog_ui.py`; as conexões continuam compartilhadas e os resultados continuam sob o cache Redis existente. `src/navigation_ui.py` oferece navegação direta e bloqueia telas privadas para visitantes. A identidade continua sendo resolvida no cabeçalho e em cada operação protegida; trocar de tela não gera outro token nem altera o cliente.
+
+Nas telas dedicadas, incluir um livro abre o carrinho; os botões de avanço, edição e retorno conectam as etapas. O carrinho exibe a quantidade salva no Redis, e a revisão/UUID de checkout ficam em estado privado independente dos widgets, preservados ao alternar telas. Logout, troca e expiração continuam limpando o estado inteiro do navegador. `src/ui_feedback.py` centraliza mensagens e descarte de sessão, incluindo expiração durante uma consulta manual de pedido.
+
+A integração corrigiu um caso visual de confirmação parcial: o resumo renderizado antes de comprar podia continuar mostrando os itens antigos depois de uma compra já salva. Agora a confirmação informa ao componente de carrinho que a transação terminou; um placeholder substitui o resumo antigo por carrinho vazio quando a limpeza foi confirmada, ou por orientação de consulta/atualização quando houve preservação ou pendência. A confirmação do pedido permanece visível sem exigir uma nova validação Redis logo após o commit.
+
+Os testes em `tests/test_system_flow.py` usam interface AppTest e persistência real, com banco MongoDB e prefixos Redis/Neo4j próprios. As fábricas são redirecionadas para essas dependências isoladas; os serviços de negócio e as consultas continuam reais. Os dados de teste são removidos ao terminar. Redis/Neo4j indisponíveis são simulados por exceções dos drivers nos pontos indicados, preservando os serviços compartilhados.
+
+| Cenário | Ação e verificação |
+| --- | --- |
+| Compra completa | Identificação → catálogo → quantidade → checkout → recomendações → catálogo; mesmo token durante a navegação, pedido único com preço histórico, estoque correto, chaves de carrinho removidas, uma relação `COMPROU` e cache atualizado |
+| Estoque insuficiente | Estoque cai depois da revisão; confirmação rejeitada sem pedido ou baixa adicional; corrigir quantidade permite concluir uma nova revisão |
+| Confirmação repetida | Primeira resposta é perdida depois de salvar; alternar telas preserva UUID/revisão; repetir e consultar mantém um pedido e uma baixa |
+| Sessão expirada | TTL real da sessão encerra antes de navegar; identidade/tentativa descartadas, carrinho Redis preservado e recuperável após nova identificação |
+| Clientes diferentes | Dois navegadores alteram quantidades e percorrem telas, mantendo tokens e carrinhos independentes |
+| Redis indisponível no catálogo | Leituras/escritas de cache falham; a interface pública continua mostrando o preço atual consultado no MongoDB |
+| Neo4j indisponível após salvar | Pedido confirmado, estoque baixado, carrinho limpo e marcador de grafo pendente; consulta posterior registra uma única relação e conclui a pendência |
+| Recomendações após comprar | Livro sugerido antes da compra desaparece das sugestões após confirmar; outros candidatos continuam disponíveis |
+| Estoque/preço e cache | Checkout troca geração após baixar estoque; edição administrativa seguida de Atualizar catálogo invalida preço/estoque antigos |
+| Expiração na consulta manual | Sessão expira entre o cabeçalho e a consulta do pedido; o mesmo tratamento central descarta identidade e campos privados |
+
+A repetição de requisições concorrentes e a recuperação de respostas perdidas do grafo também permanecem cobertas pelos testes de checkout das etapas anteriores. Alterações externas feitas diretamente no Compass exigem a invalidação manual documentada ou a expiração do TTL; a aplicação não promete detectar automaticamente essas edições.
+
+Validação final: os 135 testes da suíte completa passaram, incluindo os dez testes de integração desta etapa. No container atualizado, também passaram a compra completa com conferência dos três bancos e o cenário de Neo4j indisponível após a gravação do pedido, usando dados temporários. A aplicação respondeu HTTP 200; uma sessão demonstrativa percorreu catálogo, carrinho, checkout e recomendações com as configurações reais, preservou o mesmo token e encerrou por logout. Essa conferência não criou pedidos para clientes reais. As compras foram executadas pela interface automatizada AppTest; as falhas de Redis/Neo4j foram injetadas nos drivers, conforme descrito acima.
