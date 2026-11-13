@@ -3,6 +3,10 @@ services:
   mongodb:
     image: mongo:8.0
     entrypoint: ["bash", "/opt/spacebooks/mongo-entrypoint.sh"]
+    ulimits:
+      nofile:
+        soft: 64000
+        hard: 64000
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_USERNAME:-spacebooks}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?Run python -m src.configure_env first}
