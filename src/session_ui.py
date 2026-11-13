@@ -1,6 +1,7 @@
 """Shared Streamlit identity helpers. Never authorize from a customer ID in UI state."""
 
 import atexit
+from html import escape
 
 import streamlit as st
 
@@ -70,19 +71,29 @@ def render_identity():
     if message:
         st.warning(message)
     if customer is not None:
-        st.write(f"Cliente identificado: {customer.name} ({customer.customer_id})")
+        info, actions = st.columns([3, 2], vertical_alignment="center")
+        initial = escape((customer.name.strip() or "?")[0].upper())
+        info.markdown(
+            f'<div class="cliente"><div class="cliente-avatar">{initial}</div><div>'
+            f'<div class="cliente-nome">Olá, {escape(customer.name)}</div>'
+            f'<div class="cliente-id">{escape(customer.customer_id)}</div></div></div>',
+            unsafe_allow_html=True,
+        )
+        with actions.container(horizontal=True, horizontal_alignment="right"):
+            st.button("Trocar cliente", key="trocar_cliente", on_click=_leave, args=(True,))
+            st.button("Sair", key="sair_cliente", on_click=_leave)
         st.caption("Identificação demonstrativa, sem senha. Sessão válida por até 8 horas, sem renovação automática.")
-        left, right = st.columns(2)
-        left.button("Trocar cliente", key="trocar_cliente", on_click=_leave, args=(True,))
-        right.button("Sair", key="sair_cliente", on_click=_leave)
         return customer
 
-    if not st.checkbox("Identificação demonstrativa", key="identificacao_aberta"):
+    if not st.checkbox("Identificação demonstrativa", key="identificacao_aberta",
+                       help="Escolha um cliente cadastrado para usar carrinho, checkout e recomendações."):
         return None
     st.caption("Demonstração acadêmica: selecionar um cliente cadastrado não comprova sua identidade. Não há senha.")
-    with st.form("buscar_clientes"):
-        search = st.text_input("Nome ou ID do cliente", max_chars=200, key="pesquisa_cliente")
-        submitted = st.form_submit_button("Buscar clientes")
+    with st.form("buscar_clientes", border=False):
+        field, submit = st.columns([4, 1], vertical_alignment="bottom")
+        search = field.text_input("Nome ou ID do cliente", max_chars=200, key="pesquisa_cliente",
+                                  placeholder="Ex.: DEMO, Maria ou o ID do cliente")
+        submitted = submit.form_submit_button("Buscar clientes", width="stretch")
     if submitted:
         # Discard old candidates even when the new lookup fails.
         st.session_state.pop("clientes_encontrados", None)
@@ -95,9 +106,11 @@ def render_identity():
         if not candidates:
             st.info("Nenhum cliente encontrado. Tente outro nome ou ID.")
         else:
-            st.caption("Até 50 resultados por busca. Refine pelo nome ou ID se necessário.")
             labels = {item.customer_id: f"{item.name} ({item.customer_id})" for item in candidates}
-            selected = st.selectbox("Cliente cadastrado", options=list(labels),
-                                    format_func=labels.get, key="cliente_selecionado")
-            st.button("Entrar na demonstração", key="entrar_cliente", on_click=_enter, args=(selected,))
+            choice, enter = st.columns([4, 1], vertical_alignment="bottom")
+            selected = choice.selectbox("Cliente cadastrado", options=list(labels),
+                                        format_func=labels.get, key="cliente_selecionado")
+            enter.button("Entrar na demonstração", key="entrar_cliente", on_click=_enter, args=(selected,),
+                         type="primary", width="stretch")
+            st.caption("Até 50 resultados por busca. Refine pelo nome ou ID se necessário.")
     return None

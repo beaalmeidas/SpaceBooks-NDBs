@@ -1,6 +1,7 @@
 """Streamlit recommendations and per-book editable ratings."""
 
 import atexit
+from html import escape
 
 import streamlit as st
 
@@ -8,6 +9,7 @@ from src.cart_ui import add_button, money
 from src.domain.contracts import ServiceError, SessionExpiredError
 from src.services.recommendations import Neo4jRecommendationService
 from src.session_ui import TOKEN_KEY
+from src.theme import cover_html, section_header
 from src.ui_feedback import clear_session, show_error, show_message
 
 
@@ -50,7 +52,8 @@ def render_review(book, identified):
             st.caption("Você ainda não avaliou este livro. Não é necessário tê-lo comprado.")
         st.number_input("Nota de 1 a 5", min_value=1, max_value=5, step=1,
                         value=previous.rating if previous else 5, key=f"nota_{book.isbn}")
-        st.button("Salvar avaliação", key=f"salvar_avaliacao_{book.isbn}", on_click=_save_review, args=(book.isbn,))
+        st.button("Salvar avaliação", key=f"salvar_avaliacao_{book.isbn}", on_click=_save_review, args=(book.isbn,),
+                  icon=":material/star:")
     except SessionExpiredError as error:
         _expired(error)
     except ServiceError as error:
@@ -60,24 +63,35 @@ def render_review(book, identified):
 def render_recommendations(customer, *, force_open=False):
     if customer is None or (not force_open and not st.checkbox("Recomendações para você", key="recomendacoes_abertas")):
         return
-    st.subheader("Recomendações para você")
-    st.caption("Sugestões por gostos semelhantes, complementadas por suas categorias e autores favoritos.")
-    st.button("Atualizar recomendações", key="atualizar_recomendacoes")
+    head, refresh = st.columns([4, 1], vertical_alignment="bottom")
+    with head:
+        section_header("Recomendações para você",
+                       "Sugestões por gostos semelhantes, complementadas por suas categorias e autores favoritos.",
+                       eyebrow="Feito para você")
+    with refresh.container(horizontal=True, horizontal_alignment="right"):
+        st.button("Atualizar recomendações", key="atualizar_recomendacoes", icon=":material/refresh:")
     try:
         recommendations = recommendation_service().recommend(st.session_state.get(TOKEN_KEY), limit=6)
         if not recommendations:
             st.info("Ainda não encontramos sugestões disponíveis para este perfil. Avalie livros ou ajuste suas preferências cadastradas.")
-        columns = st.columns(3)
-        for index, item in enumerate(recommendations):
-            with columns[index % 3]:
-                with st.container(border=True):
-                    st.write(item.book.title)
-                    st.caption("; ".join(item.book.authors))
-                    st.write(f"{money(item.book.price_cents)} · Estoque: {item.book.stock}")
-                    if item.reason == "similar_customers":
-                        st.caption(f"Indicado por {int(item.score)} cliente(s) com gostos semelhantes.")
-                    else:
-                        st.caption("Combina com suas categorias ou autores favoritos.")
+        for start in range(0, len(recommendations), 3):
+            columns = st.columns(3)
+            for column, item in zip(columns, recommendations[start:start + 3]):
+                with column, st.container(border=True):
+                    cover, info = st.columns([1, 2], vertical_alignment="center")
+                    cover.markdown(f'<div class="livro">{cover_html(item.book, mini=True)}</div>', unsafe_allow_html=True)
+                    with info:
+                        authors = "; ".join(item.book.authors)
+                        st.markdown(
+                            f'<div class="livro-titulo" title="{escape(item.book.title, quote=True)}">{escape(item.book.title)}</div>'
+                            f'<div class="livro-autor" title="{escape(authors, quote=True)}">{escape(authors)}</div>'
+                            f'<div class="rec-preco">{money(item.book.price_cents)} · Estoque: {item.book.stock}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        if item.reason == "similar_customers":
+                            st.caption(f":material/group: Indicado por {int(item.score)} cliente(s) com gostos semelhantes.")
+                        else:
+                            st.caption(":material/favorite: Combina com suas categorias ou autores favoritos.")
                     add_button(item.book, True, key_prefix="recomendado_adicionar")
     except SessionExpiredError as error:
         _expired(error)
