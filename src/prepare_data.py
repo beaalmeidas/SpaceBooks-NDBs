@@ -1,5 +1,6 @@
 """Prepare validated JSONL documents and graph records from the source CSVs."""
 
+import ast
 import argparse
 import csv
 import hashlib
@@ -25,10 +26,25 @@ def demo_commerce(isbn: str) -> tuple[int, int]:
 def book_from_row(row: dict[str, str]) -> Book:
     price, stock = demo_commerce(row["isbn13"])
     pages = parse_integer(row["num_pages"], "num_pages")
+    raw_categories = row["categories"].strip()
+    categories = ast.literal_eval(raw_categories) if raw_categories else []
+
+    if not isinstance(categories, list):
+        raise ValueError("categories must be a list")
+
+    categories = tuple(
+        dict.fromkeys(
+            name.strip()
+            for name in categories
+            if isinstance(name, str) and name.strip()
+        )
+    )
+
     return Book(
         isbn=row["isbn13"], isbn10=row["isbn10"], title=row["title"],
         authors=tuple(dict.fromkeys(name.strip() for name in row["authors"].split(";") if name.strip())),
-        categories=tuple(dict.fromkeys(name.strip() for name in row["categories"].split(";") if name.strip())),
+        #categories=tuple(dict.fromkeys(name.strip() for name in row["categories"].split(";") if name.strip())),
+        categories=categories,
         price_cents=price, stock=stock, subtitle=row["subtitle"] or None,
         description=row["description"] or None, thumbnail=row["thumbnail"] or None,
         published_year=parse_integer(row["published_year"], "published_year"),

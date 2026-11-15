@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+import traceback
 
 from .database.clients import DatabaseError, connect
 from .database.config import Settings
@@ -52,7 +53,8 @@ def main() -> None:
     except DatabaseError as error:
         parser.exit(1, f"{error}\n")
     except (ValueError, OSError, KeyError, TypeError) as error:
-        parser.exit(1, f"Invalid configuration or prepared data ({type(error).__name__}). Check .env and run src.prepare_data.\n")
+        traceback.print_exc()
+        parser.exit(1, f"Invalid configuration or prepared data: {error}\n")
 
 
 if __name__ == "__main__":
