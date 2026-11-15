@@ -63,7 +63,7 @@ O carregador cria constraints únicas para `id` em cada tipo de nó e usa Cypher
 
 ## Preparação e limites
 
-`python -m src.prepare_data` lê os CSVs sem alterá-los e gera documentos JSONL e manifesto em `data/prepared/`. Preços de R$ 19,90 a R$ 149,90 e estoques de 5 a 50 unidades são fictícios, calculados pelo SHA-256 do ISBN. A regra e os hashes das entradas ficam no manifesto. Identificadores duplicados ou preferências fora do catálogo interrompem a preparação antes de substituir os arquivos existentes.
+`python -m src.prepare_data` lê os CSVs sem alterá-los e gera documentos JSONL e manifesto em `data/prepared/`. Preços de R$ 19,90 a R$ 149,90 e estoques de 5 a 50 unidades são fictícios, calculados pelo SHA-256 do ISBN. A regra e os hashes das entradas ficam no manifesto. Identificadores duplicados ou autores favoritos fora do catálogo interrompem a preparação antes de substituir os arquivos existentes. Categorias favoritas sem livros no catálogo processado são preservadas nos clientes e recebem nós no grafo, sendo registradas no manifesto em `preference_only_categories`. Autores e categorias dos livros aceitam listas literais e o formato legado separado por ponto e vírgula.
 
 `python -m src.bootstrap --prepare --check-idempotence` prepara e carrega os dados, cria índices/constraints, testa as conexões e o TTL do Redis e repete a carga para verificar contagens estáveis. Preço, estoque e moeda são definidos apenas na inserção; os demais metadados bibliográficos podem ser atualizados. Clientes existentes não são sobrescritos. O e-mail de clientes novos é normalizado com `strip().lower()` e possui índice único. Pedidos não são importados pela carga inicial.
 

@@ -412,7 +412,7 @@ Para escolher outros caminhos:
 py -3 -m src.prepare_data --books data/books-processed.csv --users data/users.csv --output data/prepared
 ```
 
-Preços de R$ 19,90 a R$ 149,90 e estoques de 5 a 50 unidades são gerados a partir do SHA-256 do ISBN. São valores exclusivos de demonstração, estáveis entre execuções. Os dados são validados antes de substituir as saídas. Identificadores duplicados e preferências sem correspondência no catálogo interrompem a preparação com erro.
+Preços de R$ 19,90 a R$ 149,90 e estoques de 5 a 50 unidades são gerados a partir do SHA-256 do ISBN. São valores exclusivos de demonstração, estáveis entre execuções. Os dados são validados antes de substituir as saídas. Identificadores duplicados e autores favoritos sem correspondência no catálogo interrompem a preparação com erro. Categorias favoritas sem livros no catálogo processado são preservadas e recebem nós no grafo; o manifesto as registra em `preference_only_categories`. A leitura de autores e categorias dos livros aceita listas literais e valores separados por ponto e vírgula.
 
 ## Organização
 

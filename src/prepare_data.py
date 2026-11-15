@@ -1,6 +1,7 @@
 """Prepare validated JSONL documents and graph records from the source CSVs."""
 
 import argparse
+import ast
 import csv
 import hashlib
 import json
@@ -16,6 +17,21 @@ from .domain.models import parse_integer
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def parse_book_list(value: str) -> tuple[str, ...]:
+    """Accept CSV list literals and the legacy semicolon-separated format."""
+    value = value.strip()
+    if value.startswith("["):
+        try:
+            names = ast.literal_eval(value)
+        except (ValueError, SyntaxError) as error:
+            raise ValueError("invalid book list") from error
+        if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
+            raise ValueError("book list must contain strings")
+    else:
+        names = value.split(";")
+    return tuple(dict.fromkeys(name.strip() for name in names if name.strip()))
+
+
 def demo_commerce(isbn: str) -> tuple[int, int]:
     """Stable fictitious BRL prices (19.90–149.90) and stock (5–50)."""
     digest = hashlib.sha256(isbn.encode("ascii")).digest()
@@ -27,8 +43,8 @@ def book_from_row(row: dict[str, str]) -> Book:
     pages = parse_integer(row["num_pages"], "num_pages")
     return Book(
         isbn=row["isbn13"], isbn10=row["isbn10"], title=row["title"],
-        authors=tuple(dict.fromkeys(name.strip() for name in row["authors"].split(";") if name.strip())),
-        categories=tuple(dict.fromkeys(name.strip() for name in row["categories"].split(";") if name.strip())),
+        authors=parse_book_list(row["authors"]),
+        categories=parse_book_list(row["categories"]),
         price_cents=price, stock=stock, subtitle=row["subtitle"] or None,
         description=row["description"] or None, thumbnail=row["thumbnail"] or None,
         published_year=parse_integer(row["published_year"], "published_year"),
@@ -73,11 +89,12 @@ def read_entities(path: Path, factory, id_field: str):
 def prepare(books_path: Path, users_path: Path, output_dir: Path) -> dict:
     books = read_entities(books_path, book_from_row, "isbn")
     customers = read_entities(users_path, customer_from_row, "customer_id")
-    categories = {category for book in books for category in book.categories}
+    book_categories = {category for book in books for category in book.categories}
+    # Preferences can refer to categories whose books were removed during cleaning.
+    # Preserve those preferences and create their category nodes as well.
+    categories = book_categories | {category for customer in customers for category in customer.favorite_categories}
     authors = {author for book in books for author in book.authors}
     for customer in customers:
-        if not set(customer.favorite_categories) <= categories:
-            raise ValueError(f"{customer.customer_id}: unknown favorite category")
         if not set(customer.favorite_authors) <= authors:
             raise ValueError(f"{customer.customer_id}: unknown favorite author")
 
@@ -120,6 +137,7 @@ def prepare(books_path: Path, users_path: Path, output_dir: Path) -> dict:
         manifest = {
             "schema_version": 1, "books": len(books), "customers": len(customers),
             "categories": len(categories), "graph_records": graph_records,
+            "preference_only_categories": sorted(categories - book_categories),
             "currency": "BRL", "demo_prices_and_stock": True,
             "price_rule": "1990 + (SHA256(ISBN13)[0:4] as big-endian integer % 131) * 100 cents",
             "stock_rule": "5 + SHA256(ISBN13)[4] % 46",

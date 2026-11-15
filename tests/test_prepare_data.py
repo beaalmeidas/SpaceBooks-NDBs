@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.prepare_data import prepare
+from src.prepare_data import prepare, parse_book_list
 
 
 class PreparationTests(unittest.TestCase):
@@ -63,11 +63,28 @@ class PreparationTests(unittest.TestCase):
             prepare(self.books, self.users, self.output)
         self.assertEqual((self.output / "books.jsonl").read_bytes(), original)
 
-    def test_unknown_preference_is_rejected(self):
+    def test_preference_without_catalog_books_is_preserved_in_graph(self):
         self.user["favorite_categories"] = '["Unknown"]'
         self.write_csv(self.users, [self.user])
-        with self.assertRaisesRegex(ValueError, "unknown favorite category"):
-            prepare(self.books, self.users, self.output)
+        manifest = prepare(self.books, self.users, self.output)
+        self.assertEqual(manifest["preference_only_categories"], ["Unknown"])
+        customer = json.loads((self.output / "customers.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(customer["favorite_categories"], ["Unknown"])
+        graph = [json.loads(line) for line in (self.output / "graph.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(any(r["type"] == "node" and r["label"] == "Categoria" and r["id"] == "Unknown" for r in graph))
+        self.assertTrue(any(r.get("relationship") == "PREFERE" and r["target"]["id"] == "Unknown" for r in graph))
+
+    def test_list_literal_categories_are_imported_without_brackets(self):
+        self.book["categories"] = "['Fiction', 'Drama; theatre', 'Fiction']"
+        self.write_csv(self.books, [self.book])
+        prepare(self.books, self.users, self.output)
+        book = json.loads((self.output / "books.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(book["categories"], ["Fiction", "Drama; theatre"])
+
+    def test_malformed_book_lists_are_rejected(self):
+        for value in ("['Fiction'", "[1]", "[__import__('os')]"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_book_list(value)
 
     def test_preference_must_be_an_array(self):
         self.user["favorite_categories"] = '"Fiction"'
