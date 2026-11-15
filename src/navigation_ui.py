@@ -15,11 +15,13 @@ def navigate(destination):
     st.session_state["navegacao"] = destination
 
 
-def render_navigation(customer):
-    destination = st.radio("Navegar", VIEWS, horizontal=True, key="navegacao")
+def render_navigation(customer, *, container=None):
+    """Draw the view selector (optionally inside ``container``) and gate private views."""
+    with container if container is not None else st.container():
+        destination = st.radio("Navegar", VIEWS, horizontal=True, key="navegacao", label_visibility="collapsed")
     if destination not in (OVERVIEW, CATALOG) and customer is None:
         st.info("Identifique um cliente para acessar esta tela.")
-        st.button("Identificar cliente", key="abrir_identificacao", on_click=_open_identity)
+        st.button("Identificar cliente", key="abrir_identificacao", on_click=_open_identity, type="primary")
         return None
     return destination
 

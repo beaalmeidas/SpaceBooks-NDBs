@@ -31,11 +31,11 @@ Aguarde o segundo comando terminar com sucesso. Ele prepara os CSVs, cria índic
 ```powershell
 docker compose --profile app up -d --build catalog
 docker compose exec -T catalog python -m src.check_connections
-# Opcional: perfis com compras e avaliações fictícias
-docker compose exec -T catalog python -m src.seed_recommendation_demo
+# Cenários da apresentação com clientes já cadastrados
+docker compose exec -T catalog python -m src.seed_presentation
 ```
 
-Abra **http://localhost:8501**. Na identificação demonstrativa, busque `DEMO`, selecione um perfil, navegue pelo catálogo, adicione um livro, revise e confirme a compra. O número do pedido permite consultar sua confirmação e retomar integrações pendentes. Não há cobrança financeira. As seções seguintes detalham as telas e os perfis.
+Abra **http://localhost:8501**. Na identificação demonstrativa, busque **Lucas Espindola** ou `U3501`, entre e abra **Recomendações**. Compare com **Giovana Macedo** (`U0829`), que recebe sugestões por preferências sem histórico. Para demonstrar uma compra, volte para Lucas, adicione uma sugestão disponível ao carrinho, revise e confirme. O número do pedido permite consultar sua confirmação e retomar integrações pendentes. Não há cobrança financeira. O [roteiro da apresentação](docs/presentation.md) reúne os exemplos de interface, Neo4j, MongoDB e Redis.
 
 ### 4. Executar os testes
 
@@ -82,7 +82,7 @@ Abra `src/notebooks/books-exploration.ipynb`. O notebook registra a exploração
 ## Limitações e dados fictícios
 
 - A identificação é demonstrativa, sem senha; selecionar um cadastro não comprova a identidade da pessoa.
-- Os cadastros demonstrativos usam e-mails `example.com`; preços e estoques iniciais são fictícios e determinísticos. Os perfis `DEMO_REC_*` possuem compras/avaliações simuladas identificadas. Compras simuladas no grafo não representam pedidos MongoDB. Lucas Espindola também é um cadastro para demonstração. Médias importadas são separadas das avaliações individuais.
+- Os cadastros demonstrativos usam e-mails `example.com`; preços e estoques iniciais são fictícios e determinísticos. A apresentação usa clientes existentes com relações marcadas por `demo_dataset="presentation-existing-v1"`. Os perfis opcionais `DEMO_REC_*` usam `recommendations-v1`. Compras simuladas no grafo não representam pedidos MongoDB. Médias importadas são separadas das avaliações individuais.
 - Checkout não inclui pagamento, frete ou reserva de estoque no carrinho. O estoque é validado e baixado na confirmação, preservando os preços históricos do pedido.
 - MongoDB usa replica set de um nó para transações. Não há transação distribuída entre os três bancos. Pendências após a compra ficam no MongoDB e são retomadas por consulta, repetição da tentativa ou `python -m src.retry_checkout`; não há trabalhador automático.
 - Edições externas pelo Compass exigem invalidação do cache ou expiração do TTL. Sem Redis, o catálogo público continua disponível, mas sessões e carrinhos ficam indisponíveis. Recomendações exigem conferir o histórico Neo4j antes de aplicar a alternativa por preferências.
@@ -204,9 +204,39 @@ Livros já comprados ou avaliados por você, removidos do catálogo ou sem estoq
 
 Se a consulta de clientes semelhantes falhar depois de o histórico ser conhecido, o serviço pode usar somente preferências. Se não conseguir conferir o histórico de compras, apresenta erro e não inventa recomendações que poderiam incluir um livro já comprado. O catálogo e as outras telas continuam disponíveis conforme seus próprios bancos. Sessões e notas em edição são isoladas por navegador e descartadas ao trocar de cliente ou sair.
 
-### Perfis fictícios para demonstração
+### Apresentação com clientes já cadastrados
 
-Com a carga inicial executada, carregue os dados identificados em `data/recommendation-demo.json`:
+Para mostrar Lucas Espindola, Eduarda Carvalho, Felipe Pinto, Clara Rodrigues e Giovana Macedo com cenários de similaridade, ficção e início sem histórico:
+
+```powershell
+docker compose exec -T catalog python -m src.seed_presentation
+# Alternativa com Python local:
+.\.venv\Scripts\python.exe -m src.seed_presentation
+```
+
+A carga usa `data/presentation-existing.json` e acrescenta dez compras simuladas e dezesseis avaliações identificadas no Neo4j, preservando cadastros, pedidos, estoque e avaliações já existentes. Giovana permanece sem histórico. Repetir não duplica as relações; a carga recusa o cenário se a cliente reservada para início sem histórico já tiver compras ou avaliações. Consulte o [roteiro e as consultas para apresentação](docs/presentation.md).
+
+| Cliente para selecionar | Exemplo para demonstrar |
+| --- | --- |
+| Lucas Espindola — `U3501` | Sugestões por similaridade, como *Java* e *C++ Programmer's Notebook*; *Robot Visions*, avaliado com nota 2, fica excluído |
+| Eduarda Carvalho — `U0503` | Livros de computação em comum com Lucas e compras que ajudam a gerar sugestões |
+| Felipe Pinto — `U0585` | Avaliações positivas de *Java* e *The Robots of Dawn*, conectando computação e ficção |
+| Clara Rodrigues — `U0357` | Histórico de ficção para comparar com o perfil misto de Lucas |
+| Giovana Macedo — `U0829` | Sem histórico: sugestões pelas categorias e autores favoritos, como livros de Aldous Huxley |
+
+No Neo4j Browser, mostre apenas as relações desta apresentação:
+
+```cypher
+MATCH (c:Cliente)-[r:COMPROU|AVALIOU]->(p:Produto)
+WHERE r.demo_dataset = 'presentation-existing-v1'
+RETURN c, r, p
+```
+
+Os títulos sugeridos dependem do histórico e do estoque atuais; compras posteriores podem mudar os resultados. Use Giovana para mostrar o cenário sem histórico antes de registrar uma compra ou avaliação para ela.
+
+### Perfis fictícios adicionais (opcionais)
+
+A apresentação principal usa os clientes da tabela acima. Para explorar outros cenários, a carga alternativa de perfis separados continua disponível em `data/recommendation-demo.json`:
 
 ```powershell
 .\.venv\Scripts\python.exe -m src.seed_recommendation_demo
