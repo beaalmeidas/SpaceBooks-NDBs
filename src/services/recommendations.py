@@ -137,6 +137,128 @@ class Neo4jRecommendationService:
         except PyMongoError:
             raise ServiceUnavailableError("Não foi possível consultar preço e disponibilidade das recomendações.") from None
 
+
+    # RECOMMENDATIONS BASED ON RECENT PURCHASES
+    def _behavioral_recommendations(self, customer_id, excluded, limit):
+        now = datetime.now(timezone.utc)
+        category_scores = {}
+        author_scores = {}
+
+        try:
+            orders = self.db.orders.find(
+                {
+                    "customer_id": customer_id,
+                    "status": "confirmed",
+                },
+                {
+                    "items.book_id": 1,
+                    "items.quantity": 1,
+                    "created_at": 1,
+                },
+            ).max_time_ms(self.query_timeout_ms)
+
+            orders = list(orders)
+
+        except PyMongoError:
+            raise ServiceUnavailableError(
+                "Não foi possível consultar o histórico de compras."
+            ) from None
+
+        purchased_ids = {
+            item["book_id"]
+            for order in orders
+            for item in order.get("items", [])
+        }
+
+        if not purchased_ids:
+            return []
+
+        purchased_books = self._books({
+            "_id": {"$in": sorted(purchased_ids)}
+        })
+
+        for order in orders:
+            created_at = order.get("created_at")
+
+            if isinstance(created_at, str):
+                created_at = datetime.fromisoformat(
+                    created_at.replace("Z", "+00:00")
+                )
+
+            if not isinstance(created_at, datetime):
+                continue
+
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+
+            days_old = max(
+                (now - created_at).total_seconds() / 86400,
+                0,
+            )
+
+            recency_weight = 1 / (1 + days_old / 90)
+
+            for item in order.get("items", []):
+                quantity = item.get("quantity", 1)
+                weight = quantity * recency_weight
+
+                book = next(
+                    (
+                        book for book in purchased_books
+                        if book.isbn == item["book_id"]
+                    ),
+                    None,
+                )
+
+                if book is None:
+                    continue
+
+                for category in book.categories:
+                    category_scores[category] = (
+                        category_scores.get(category, 0) + weight
+                    )
+
+                for author in book.authors:
+                    author_scores[author] = (
+                        author_scores.get(author, 0) + weight
+                    )
+
+        if not category_scores and not author_scores:
+            return []
+
+        candidates = self._books({
+            "_id": {"$nin": sorted(excluded)},
+            "stock": {"$gt": 0},
+            "$or": [
+                {"categories": {"$in": list(category_scores)}},
+                {"authors": {"$in": list(author_scores)}},
+            ],
+        })
+
+        recommendations = []
+
+        for book in candidates:
+            score = sum(
+                category_scores.get(category, 0)
+                for category in book.categories
+            ) + sum(
+                author_scores.get(author, 0)
+                for author in book.authors
+            )
+
+            if score > 0:
+                recommendations.append(
+                    Recommendation(book, float(score), "behavior")
+                )
+
+        recommendations.sort(
+            key=lambda item: (-item.score, item.book.isbn)
+        )
+
+        return recommendations[:limit]
+
+
+
     def recommend(self, session_token, limit=10):
         customer = self.sessions.resolve(session_token)
         if type(limit) is not int or not 1 <= limit <= 50:
@@ -152,7 +274,9 @@ class Neo4jRecommendationService:
         try:
             history = self._query(HISTORY, customer=self._graph_id(customer.customer_id))
         except (Neo4jError, DriverError):
-            raise ServiceUnavailableError("Neo4j indisponível. Não foi possível conferir o histórico para recomendar livros com segurança.") from None
+            raise ServiceUnavailableError(
+                    "Neo4j indisponível. Não foi possível conferir o histórico para recomendar livros com segurança."
+                ) from None
         excluded, signals = set(purchased), set(purchased)
         for row in history:
             isbn = self._book_id(row["id"])
@@ -165,8 +289,8 @@ class Neo4jRecommendationService:
         if signals:
             try:
                 candidates = self._query(SIMILAR, customer=self._graph_id(customer.customer_id),
-                                         signals=[self._graph_id(isbn) for isbn in sorted(signals)],
-                                         excluded=[self._graph_id(isbn) for isbn in sorted(excluded)])
+                                            signals=[self._graph_id(isbn) for isbn in sorted(signals)],
+                                            excluded=[self._graph_id(isbn) for isbn in sorted(excluded)])
                 for row in candidates:
                     isbn = self._book_id(row["id"])
                     if isbn is not None and isbn not in excluded and type(row["score"]) is int and row["score"] > 0:
@@ -178,7 +302,20 @@ class Neo4jRecommendationService:
             "_id": {"$in": sorted(scores)}, "stock": {"$gt": 0},
         })] if scores else []
         similar.sort(key=lambda item: (-item.score, item.book.isbn))
+
         result = similar[:limit]
+
+        if len(result) < limit:
+            excluded.update(item.book.isbn for item in result)
+
+            behavioral = self._behavioral_recommendations(
+                customer.customer_id,
+                excluded,
+                limit - len(result),
+            )
+
+            result.extend(behavioral)
+
         if len(result) < limit and (customer.favorite_categories or customer.favorite_authors):
             excluded.update(item.book.isbn for item in result)
             preferences = []
@@ -191,4 +328,5 @@ class Neo4jRecommendationService:
                     preferences.append(Recommendation(book, float(score), "preferences"))
             preferences.sort(key=lambda item: (-item.score, item.book.isbn))
             result.extend(preferences[:limit - len(result)])
+
         return tuple(result)
