@@ -1,0 +1,151 @@
+{
+  "dataset": "presentation-existing-v1",
+  "description": "Sinais ficticios para apresentacao com clientes existentes; nao cria pedidos nem altera estoque ou cadastros. Avaliacoes existentes sao preservadas.",
+  "customers": [
+    {
+      "id": "U3501",
+      "role": "Computacao e ficcao; perfil principal"
+    },
+    {
+      "id": "U0503",
+      "role": "Leitora semelhante de computacao"
+    },
+    {
+      "id": "U0585",
+      "role": "Leitor semelhante; computacao e Asimov"
+    },
+    {
+      "id": "U0357",
+      "role": "Perfil de ficcao"
+    },
+    {
+      "id": "U0829",
+      "role": "Recomendacoes por preferencias, sem historico",
+      "without_history": true
+    }
+  ],
+  "purchases": [
+    {
+      "customer": "U3501",
+      "book": "9780072226966"
+    },
+    {
+      "customer": "U3501",
+      "book": "9780002005883"
+    },
+    {
+      "customer": "U0503",
+      "book": "9780072226966"
+    },
+    {
+      "customer": "U0503",
+      "book": "9780130887016"
+    },
+    {
+      "customer": "U0503",
+      "book": "9780131492028"
+    },
+    {
+      "customer": "U0585",
+      "book": "9780072226966"
+    },
+    {
+      "customer": "U0585",
+      "book": "9780060556525"
+    },
+    {
+      "customer": "U0585",
+      "book": "9780451450647"
+    },
+    {
+      "customer": "U0357",
+      "book": "9780002005883"
+    },
+    {
+      "customer": "U0357",
+      "book": "9780006482079"
+    }
+  ],
+  "reviews": [
+    {
+      "customer": "U3501",
+      "book": "9780002005883",
+      "rating": 5
+    },
+    {
+      "customer": "U3501",
+      "book": "9780060556525",
+      "rating": 5
+    },
+    {
+      "customer": "U3501",
+      "book": "9780451450647",
+      "rating": 2
+    },
+    {
+      "customer": "U0503",
+      "book": "9780072226966",
+      "rating": 5
+    },
+    {
+      "customer": "U0503",
+      "book": "9780130887016",
+      "rating": 5
+    },
+    {
+      "customer": "U0503",
+      "book": "9780131492028",
+      "rating": 4
+    },
+    {
+      "customer": "U0503",
+      "book": "9780060556525",
+      "rating": 4
+    },
+    {
+      "customer": "U0503",
+      "book": "9780006178736",
+      "rating": 2
+    },
+    {
+      "customer": "U0585",
+      "book": "9780072226966",
+      "rating": 4
+    },
+    {
+      "customer": "U0585",
+      "book": "9780131492028",
+      "rating": 5
+    },
+    {
+      "customer": "U0585",
+      "book": "9780060556525",
+      "rating": 5
+    },
+    {
+      "customer": "U0585",
+      "book": "9780553299496",
+      "rating": 5
+    },
+    {
+      "customer": "U0357",
+      "book": "9780002005883",
+      "rating": 4
+    },
+    {
+      "customer": "U0357",
+      "book": "9780006178736",
+      "rating": 5
+    },
+    {
+      "customer": "U0357",
+      "book": "9780006482079",
+      "rating": 5
+    },
+    {
+      "customer": "U0357",
+      "book": "9780586008355",
+      "rating": 4
+    }
+  ]
+}
