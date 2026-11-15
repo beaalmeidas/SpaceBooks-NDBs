@@ -9,8 +9,10 @@ RUN --mount=type=secret,id=pip_ca,required=false \
     else \
       pip install --no-cache-dir -r "$REQUIREMENTS_FILE"; \
     fi
+COPY .streamlit ./.streamlit
 COPY src ./src
 COPY tests ./tests
 COPY data/books-processed.csv data/users.csv ./data/
 COPY data/recommendation-demo.json ./data/
+COPY data/presentation-existing.json ./data/
 CMD ["python", "-m", "src.bootstrap", "--prepare"]
