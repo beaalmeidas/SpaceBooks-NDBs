@@ -1,0 +1,23 @@
+{
+  "dataset": "recommendations-v1",
+  "description": "Perfis inteiramente fictícios para demonstração; compras simuladas apenas no grafo, sem pedidos nem baixa de estoque.",
+  "customers": [
+    {"id": "DEMO_REC_TECH", "name": "DEMO · Computação com compras", "categories": ["Computers"], "authors": ["Walter J. Savitch"]},
+    {"id": "DEMO_REC_TECH_PEER", "name": "DEMO · Leitor semelhante de computação", "categories": ["Computers"], "authors": ["Walter J. Savitch"]},
+    {"id": "DEMO_REC_FICTION", "name": "DEMO · Ficção com avaliações", "categories": ["Fiction"], "authors": ["Janny Wurts"]},
+    {"id": "DEMO_REC_FICTION_PEER", "name": "DEMO · Leitor semelhante de ficção", "categories": ["Fiction"], "authors": ["Janny Wurts"]},
+    {"id": "DEMO_REC_COLD", "name": "DEMO · Sem histórico", "categories": ["Computers", "Fiction"], "authors": ["Walter J. Savitch"]}
+  ],
+  "purchases": [
+    {"customer": "DEMO_REC_TECH", "book": "9780072226966"},
+    {"customer": "DEMO_REC_TECH_PEER", "book": "9780072226966"},
+    {"customer": "DEMO_REC_TECH_PEER", "book": "9780130887016"},
+    {"customer": "DEMO_REC_FICTION_PEER", "book": "9780006482079"}
+  ],
+  "reviews": [
+    {"customer": "DEMO_REC_TECH_PEER", "book": "9780131492028", "rating": 5},
+    {"customer": "DEMO_REC_FICTION", "book": "9780002005883", "rating": 5},
+    {"customer": "DEMO_REC_FICTION_PEER", "book": "9780002005883", "rating": 4},
+    {"customer": "DEMO_REC_FICTION_PEER", "book": "9780006178736", "rating": 5}
+  ]
+}

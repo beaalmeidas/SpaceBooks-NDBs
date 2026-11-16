@@ -151,8 +151,11 @@ activemq-data/
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
+.venv-*/
 env/
 venv/
 ENV/
@@ -218,3 +221,20 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Reproducible output from python -m src.prepare_data
+data/prepared/
+
+# Machine-specific public trust bundles and local tools
+.local/
+
+# Local credentials, certificates and editor/agent configuration
+*.pem
+*.key
+*.p12
+*.pfx
+.vscode/
+.idea/
+.agents/
+.codex/
+.aws/
