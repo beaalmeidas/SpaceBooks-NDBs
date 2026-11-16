@@ -24,12 +24,26 @@ def _money(cents):
     return f"R$ {reais},{cents % 100:02d}"
 
 
-def render_checkout(cart):
+def render_checkout(cart, *, customer=None, modern=False):
     confirmed_now = None
-    st.subheader("Finalizar compra")
+    if modern and st.session_state.get('checkout_result'):
+        from src.confirmation_ui import render_confirmation
+        if st.session_state.get('confirmation_error'):
+            st.error(st.session_state['confirmation_error'])
+        render_confirmation(st.session_state['checkout_result'])
+        return None
+    if not modern:
+        st.subheader("Finalizar compra")
+    if not modern and cart and cart.items and st.session_state.get('frete_cep_calculado'):
+        from src.services.shipping import estimate_shipping
+        shipping = estimate_shipping(st.session_state['frete_cep_calculado'], cart.total_cents)
+        st.info(f'Entrega simulada: {_money(shipping.cost_cents)} · {shipping.minimum_days} a {shipping.maximum_days} dias úteis. '
+                'O frete não integra o pedido nesta demonstração; a confirmação abaixo inclui somente os livros.')
     token = st.session_state.get(TOKEN_KEY)
     try:
-        if cart and cart.items and st.button("Revisar compra", key="revisar_compra"):
+        automatic_review = modern and cart and cart.items and not any(st.session_state.get(key) for key in ('checkout_request_id', 'checkout_review', 'checkout_result'))
+        refresh = st.button("Atualizar revisão" if modern else "Revisar compra", key="revisar_compra") if cart and cart.items else False
+        if cart and cart.items and (automatic_review or refresh):
             previous = st.session_state.get("checkout_request_id")
             if previous and st.session_state.get("checkout_review"):
                 try:
@@ -49,14 +63,19 @@ def render_checkout(cart):
             st.session_state.pop("checkout_result", None)
         review = st.session_state.get("checkout_review")
         if review:
-            st.write("**Revisão da compra**")
-            for line in review.items:
-                st.write(f"{line.book.title} · {line.quantity} × {_money(line.book.price_cents)} = {_money(line.subtotal_cents)}")
-            st.write(f"**Valor a confirmar: {_money(review.total_cents)}**")
+            if modern:
+                from src.review_ui import render_order_review
+                confirm = render_order_review(review, customer, current_cart=cart)
+            else:
+                st.write("**Revisão da compra**")
+                for line in review.items:
+                    st.write(f"{line.book.title} · {line.quantity} × {_money(line.book.price_cents)} = {_money(line.subtotal_cents)}")
+                st.write(f"**Valor a confirmar: {_money(review.total_cents)}**")
+                confirm = st.button("Confirmar compra", key="confirmar_compra")
             request_id = st.session_state["checkout_request_id"]
             st.caption(f"Identificador desta tentativa: {request_id}")
             st.caption("Demonstração acadêmica, sem cobrança ou pagamento externo.")
-            if st.button("Confirmar compra", key="confirmar_compra"):
+            if confirm:
                 result = checkout_service().checkout(token, request_id, review.revision)
                 confirmed_now = result
                 st.session_state["checkout_result"] = result
@@ -70,6 +89,10 @@ def render_checkout(cart):
             st.session_state["checkout_result"] = checkout_service().get_order(token, request_id)
         result = st.session_state.get("checkout_result")
         if result:
+            if modern:
+                from src.confirmation_ui import render_confirmation
+                render_confirmation(result)
+                return confirmed_now
             st.success(f"Compra confirmada! Pedido: {result.order.order_id}")
             st.write(f"**Total do pedido: {_money(result.order.total_cents)}**")
             for item in result.order.items:
@@ -88,19 +111,20 @@ def render_checkout(cart):
         request_id = st.session_state.get("checkout_request_id")
         if request_id:
             st.caption(f"Mantenha o identificador desta tentativa: {request_id}")
-    with st.form("consultar_pedido"):
-        order_id = st.text_input("Número de um pedido anterior", key="numero_pedido")
-        submitted = st.form_submit_button("Consultar pedido")
-    if submitted:
-        try:
-            result = checkout_service().get_order(token, order_id.strip())
-            st.session_state["checkout_result"] = result
-            st.session_state["checkout_request_id"] = result.order.order_id
-            st.session_state.pop("checkout_review", None)
-            st.rerun()
-        except SessionExpiredError as error:
-            clear_session(error, rerun=True)
-        except ServiceError as error:
-            show_error(error)
+    with st.expander("Consultar um pedido anterior", expanded=not modern):
+        with st.form("consultar_pedido"):
+            order_id = st.text_input("Número de um pedido anterior", key="numero_pedido")
+            submitted = st.form_submit_button("Consultar pedido")
+        if submitted:
+            try:
+                result = checkout_service().get_order(token, order_id.strip())
+                st.session_state["checkout_result"] = result
+                st.session_state["checkout_request_id"] = result.order.order_id
+                st.session_state.pop("checkout_review", None)
+                st.rerun()
+            except SessionExpiredError as error:
+                clear_session(error, rerun=True)
+            except ServiceError as error:
+                show_error(error)
     st.button("Voltar ao catálogo", key="voltar_catalogo", on_click=navigate, args=(CATALOG,))
     return confirmed_now

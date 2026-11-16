@@ -16,7 +16,7 @@ def buy_now(isbn):
         token = st.session_state.get(TOKEN_KEY)
         if not token:
             raise SessionExpiredError('Identifique-se para comprar este livro.')
-        cart_service().add_item(token, isbn)
+        cart_service().ensure_item(token, isbn)
     except SessionExpiredError as error:
         clear_session(error)
         return
@@ -70,7 +70,7 @@ def render_product(customer):
         with buy:
             st.button('Comprar agora', key='produto_comprar', type='primary', width='stretch',
                       disabled=customer is None or book.stock < 1, on_click=buy_now, args=(book.isbn,))
-        st.caption('Comprar agora adiciona uma unidade e abre o checkout do seu carrinho. Você revisa todos os itens antes de confirmar.')
+        st.caption('Comprar agora inclui o livro se necessário e abre o checkout do seu carrinho. Você revisa todos os itens antes de confirmar.')
         st.subheader('Sobre o livro')
         st.write(book.description or 'Descrição indisponível.')
     st.divider()

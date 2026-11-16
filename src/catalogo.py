@@ -4,6 +4,7 @@ from src.session_ui import render_identity
 from src.catalog_ui import render_catalog
 from src.navigation_ui import OVERVIEW, CATALOG, CATEGORIES, PRODUCT, CART, CHECKOUT, RECOMMENDATIONS, render_navigation, navigate
 from src.cart_ui import render_cart
+from src.bag_icon import render_bag_icon
 from src.recommendations_ui import render_recommendations
 from src.ui_theme import CSS
 from src.ui_scroll import render_pending_scroll
@@ -20,10 +21,16 @@ with account:
     with st.popover("Identificar-se", icon=":material/person:", width="stretch"):
         cliente_atual = render_identity()
 with bag:
-    st.button("", icon=":material/shopping_bag:", key="abrir_sacola", help="Abrir carrinho", on_click=navigate, args=(CART,))
+    render_bag_icon(cliente_atual)
 with menu:
     destino = render_navigation(cliente_atual)
 st.divider()
+add_notice = st.session_state.pop("carrinho_add_aviso", None)
+if add_notice:
+    if add_notice[0] == "success":
+        st.toast(add_notice[1], icon="🛍️")
+    else:
+        st.error(add_notice[1])
 if destino in (OVERVIEW, CATALOG, CATEGORIES):
     st.markdown('<div id="spacebooks-inicio"></div>', unsafe_allow_html=True)
     left, right = st.columns([1.25, 1], gap="large", vertical_alignment="center")
@@ -46,7 +53,8 @@ elif destino == PRODUCT:
 elif destino == CART:
     render_cart(cliente_atual, force_open=True, include_checkout=False)
 elif destino == CHECKOUT:
-    render_cart(cliente_atual, force_open=True, checkout_only=True)
+    from src.review_ui import render_review_page
+    render_review_page(cliente_atual)
 elif destino == RECOMMENDATIONS:
     render_recommendations(cliente_atual, force_open=True)
 st.markdown('<div class="footer">SpaceBooks &nbsp; · &nbsp; Um universo inteiro entre páginas.<br>Ambiente demonstrativo · Sem cobrança financeira.</div>', unsafe_allow_html=True)

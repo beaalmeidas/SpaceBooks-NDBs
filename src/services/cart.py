@@ -104,6 +104,10 @@ class RedisCartService:
     def add_item(self, session_token, book_id, quantity=1):
         return self._mutate(session_token, book_id, "add", quantity)
 
+    def ensure_item(self, session_token, book_id):
+        """Include one unit only when absent; repeated UI clicks keep quantity."""
+        return self._mutate(session_token, book_id, "ensure", 1)
+
     def set_quantity(self, session_token, book_id, quantity):
         return self._mutate(session_token, book_id, "set", quantity)
 
@@ -129,7 +133,10 @@ class RedisCartService:
                         if operation == "remove":
                             target = None
                         else:
-                            target = quantity + (previous or 0) if operation == "add" else quantity
+                            if operation == "ensure":
+                                target = previous if previous is not None else quantity
+                            else:
+                                target = quantity + (previous or 0) if operation == "add" else quantity
                             validate_quantity(target)
                             if target > book.stock:
                                 raise StockUnavailableError("A quantidade solicitada supera o estoque atual. O carrinho não reserva unidades.")

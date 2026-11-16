@@ -34,7 +34,7 @@ def render_navigation(customer):
                           key=f"nav_{view}", width="stretch",
                           type="primary" if destination == view else "secondary",
                           on_click=navigate, args=(view,))
-    if destination not in (OVERVIEW, CATALOG, CATEGORIES, PRODUCT) and customer is None:
+    if destination not in (OVERVIEW, CATALOG, CATEGORIES, PRODUCT, CART) and customer is None:
         st.info("Identifique um cliente para acessar esta tela.")
         st.button("Identificar cliente", key="abrir_identificacao", on_click=_open_identity)
         return None

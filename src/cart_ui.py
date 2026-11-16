@@ -24,28 +24,28 @@ def cart_service():
 
 
 def _action(operation, isbn=None):
+    notice_key = "carrinho_add_aviso" if operation == "add" else "carrinho_aviso"
     try:
         token = st.session_state.get(TOKEN_KEY)
         if not token:
             raise SessionExpiredError("Identifique-se para utilizar o carrinho.")
         service = cart_service()
         if operation == "add":
-            service.add_item(token, isbn)
+            service.ensure_item(token, isbn)
         elif operation == "set":
             service.set_quantity(token, isbn, st.session_state[f"carrinho_quantidade_{isbn}"])
         else:
             isbn = isbn or st.session_state.get("remover_isbn", "").strip()
             service.remove_item(token, isbn)
         st.session_state.pop(f"carrinho_quantidade_{isbn}", None)
-        st.session_state["carrinho_aviso"] = ("success", "Carrinho atualizado.")
+        st.session_state[notice_key] = ("success", "Livro na sacola. Ajuste a quantidade pelos botões + e −." if operation == "add" else "Carrinho atualizado.")
     except SessionExpiredError as error:
         clear_session(error)
         return
     except ServiceError as error:
-        st.session_state["carrinho_aviso"] = ("error", str(error))
-    st.session_state["carrinho_aberto"] = True
-    if operation == "add" and st.session_state.get("navegacao", OVERVIEW) != OVERVIEW:
-        navigate(CART)
+        st.session_state[notice_key] = ("error", str(error))
+    if operation != "add":
+        st.session_state["carrinho_aberto"] = True
 
 
 def add_button(book, identified, *, key_prefix="adicionar"):
@@ -55,6 +55,10 @@ def add_button(book, identified, *, key_prefix="adicionar"):
 
 
 def render_cart(customer, *, force_open=False, include_checkout=True, checkout_only=False):
+    if force_open and not include_checkout and not checkout_only:
+        from src.bag_ui import render_bag
+        render_bag(customer)
+        return
     if customer is None:
         st.caption("Identifique um cliente para adicionar livros e consultar seu carrinho.")
         return

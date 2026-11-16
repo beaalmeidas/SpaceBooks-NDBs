@@ -1,10 +1,14 @@
 """Streamlit recommendations and per-book editable ratings."""
 
 import atexit
+from concurrent.futures import ThreadPoolExecutor
+from html import escape
 
 import streamlit as st
 
-from src.cart_ui import add_button, money
+from src.book_card_ui import render_book_card
+from src.services.covers import cover_image
+from src.navigation_ui import CATALOG, navigate
 from src.domain.contracts import ServiceError, SessionExpiredError
 from src.services.recommendations import Neo4jRecommendationService
 from src.session_ui import TOKEN_KEY
@@ -60,25 +64,31 @@ def render_review(book, identified):
 def render_recommendations(customer, *, force_open=False):
     if customer is None or (not force_open and not st.checkbox("Recomendações para você", key="recomendacoes_abertas")):
         return
-    st.subheader("Recomendações para você")
-    st.caption("Sugestões por gostos semelhantes, complementadas por suas categorias e autores favoritos.")
-    st.button("Atualizar recomendações", key="atualizar_recomendacoes")
+    st.markdown('<div class="eyebrow">SELEÇÃO PARA O SEU UNIVERSO</div><h1 class="section-title">Sua próxima história pode estar aqui.</h1>', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-copy">Uma seleção para {escape(customer.name)}, inspirada nas suas preferências e em leitores com gostos parecidos.</div>', unsafe_allow_html=True)
+    text, refresh = st.columns([3, 1], vertical_alignment='center')
+    with text:
+        st.caption('Descubra novos favoritos · Avalie livros para refinar as sugestões')
+    with refresh:
+        st.button('Atualizar recomendações', key='atualizar_recomendacoes', width='stretch')
+    st.divider()
     try:
-        recommendations = recommendation_service().recommend(st.session_state.get(TOKEN_KEY), limit=6)
+        recommendations = recommendation_service().recommend(st.session_state.get(TOKEN_KEY), limit=8)
         if not recommendations:
-            st.info("Ainda não encontramos sugestões disponíveis para este perfil. Avalie livros ou ajuste suas preferências cadastradas.")
-        columns = st.columns(3)
+            with st.container(border=True):
+                st.subheader('Vamos descobrir o que você gosta?')
+                st.write('Ainda não encontramos sugestões para este perfil. Explore o catálogo e avalie livros para ajudar nas próximas recomendações.')
+                st.button('Explorar o catálogo →', key='recomendacoes_catalogo', type='primary', on_click=navigate, args=(CATALOG,))
+            return
+        st.markdown(f'<div class="quantidade-livros">{len(recommendations)} livros selecionados para você</div>', unsafe_allow_html=True)
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            covers = list(pool.map(lambda item: cover_image(item.book.isbn, item.book.thumbnail), recommendations))
+        columns = st.columns(4, gap='medium')
         for index, item in enumerate(recommendations):
-            with columns[index % 3]:
-                with st.container(border=True):
-                    st.write(item.book.title)
-                    st.caption("; ".join(item.book.authors))
-                    st.write(f"{money(item.book.price_cents)} · Estoque: {item.book.stock}")
-                    if item.reason == "similar_customers":
-                        st.caption(f"Indicado por {int(item.score)} cliente(s) com gostos semelhantes.")
-                    else:
-                        st.caption("Combina com suas categorias ou autores favoritos.")
-                    add_button(item.book, True, key_prefix="recomendado_adicionar")
+            reason = (f'Leitores com gostos semelhantes · {int(item.score)} indicações'
+                      if item.reason == 'similar_customers' else 'Combina com suas categorias ou autores favoritos')
+            with columns[index % 4]:
+                render_book_card(item.book, True, covers[index], prefix='recomendado_', reason=reason)
     except SessionExpiredError as error:
         _expired(error)
     except ServiceError as error:
