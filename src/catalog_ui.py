@@ -2,13 +2,15 @@
 
 import atexit
 from html import escape
+from concurrent.futures import ThreadPoolExecutor
 
 import streamlit as st
 
 from src.domain.contracts import CatalogQuery, ServiceError
 from src.services.cached_catalog import CachedCatalogService
 from src.cart_ui import add_button
-from src.recommendations_ui import render_review
+from src.navigation_ui import open_product
+from src.services.covers import cover_image
 from src.ui_feedback import show_error
 
 
@@ -25,26 +27,37 @@ def mostrar_erro(erro):
     st.stop()
 
 
-def render_catalog(identified=False):
-    st.markdown('''
-    <div class="catalogo-cabecalho">
-        <div class="catalogo-titulo">Descubra sua próxima leitura ✦</div>
-        <div class="catalogo-descricao">Explore nossa coleção e encontre histórias
-            que merecem um lugar na sua estante.</div>
-    </div>
-    ''', unsafe_allow_html=True)
+def _choose_category(category):
+    st.session_state.categoria_catalogo = category
+    st.session_state.pagina_catalogo = 1
+
+
+def render_catalog(identified=False, *, show_search=True):
 
     try:
         catalogo = obter_catalogo()
-        if st.button("Atualizar catálogo", key="atualizar_catalogo"):
-            catalogo.invalidate_cache()
         categorias = catalogo.list_categories()
     except ServiceError as erro:
         mostrar_erro(erro)
 
-    col_pesquisa, col_categoria, col_ordem = st.columns([3, 2, 2])
-    with col_pesquisa:
-        pesquisa = st.text_input("Pesquisar livros", placeholder="Qual história você procura?", key="pesquisa_catalogo")
+    st.markdown('<div id="spacebooks-categorias"></div>', unsafe_allow_html=True)
+    st.caption("EXPLORE POR GÊNERO")
+    shortcuts = [(None, "Todos"), *[(value, label) for value, label in
+        (("Fiction", "Ficção"), ("Computers", "Tecnologia"), ("History", "História"),
+         ("Biography & Autobiography", "Biografias")) if value in categorias]]
+    buttons = st.columns(len(shortcuts))
+    for column, (value, label) in zip(buttons, shortcuts):
+        with column:
+            st.button(label, key=f"genero_{value}", width="stretch",
+                      type="primary" if st.session_state.get("categoria_catalogo") == value else "secondary",
+                      on_click=_choose_category, args=(value,))
+    st.divider()
+    st.markdown('<div id="spacebooks-catalogo" class="eyebrow">CURADORIA SPACEBOOKS</div><h2 class="section-title">Livros para começar uma nova jornada</h2><div class="section-copy">Uma seleção entre clássicos, descobertas e novos favoritos.</div>', unsafe_allow_html=True)
+    if show_search:
+        pesquisa = st.text_input("Pesquisar livros", placeholder="Busque por título ou autor…", key="pesquisa_catalogo")
+    else:
+        pesquisa = st.session_state.get("pesquisa_catalogo", "")
+    col_categoria, col_ordem, col_atualizar = st.columns([2, 2, 1])
     with col_categoria:
         opcoes_categorias = [None, *categorias]
         if st.session_state.get("categoria_catalogo") not in opcoes_categorias:
@@ -54,6 +67,13 @@ def render_catalog(identified=False):
     with col_ordem:
         ordens = {"Título (A–Z)": "title_asc", "Menor preço": "price_asc", "Maior preço": "price_desc"}
         ordem = st.selectbox("Ordenar por", list(ordens), key="ordem_catalogo")
+    with col_atualizar:
+        st.caption("CATÁLOGO")
+        if st.button("Atualizar catálogo", key="atualizar_catalogo", width="stretch"):
+            try:
+                catalogo.invalidate_cache()
+            except ServiceError as erro:
+                mostrar_erro(erro)
 
     filtros = (pesquisa.strip().casefold(), categoria, ordens[ordem])
     if st.session_state.get("filtro_anterior") != filtros:
@@ -76,38 +96,36 @@ def render_catalog(identified=False):
     st.session_state.pagina_catalogo = pagina_atual
 
     quantidade_formatada = f"{resultado.total:,}".replace(",", ".")
-    st.markdown(f'<div class="quantidade-livros">📚 {quantidade_formatada} livro(s) encontrado(s)</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="quantidade-livros">{quantidade_formatada} livros encontrados · Página {pagina_atual} de {total_paginas}</div>', unsafe_allow_html=True)
     if not resultado.items:
         st.info("Nenhum livro encontrado. Tente outra pesquisa ou categoria.")
     else:
-        colunas = st.columns(4)
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            covers = list(pool.map(lambda book: cover_image(book.isbn, book.thumbnail), resultado.items))
+        colunas = st.columns(4, gap='medium')
         for indice, livro in enumerate(resultado.items):
             with colunas[indice % 4]:
-                with st.container(border=True):
-                    if livro.thumbnail:
-                        st.markdown(f'<div class="capa-area"><img src="{escape(livro.thumbnail, quote=True)}" alt="Capa do livro"></div>', unsafe_allow_html=True)
+                with st.container(border=True, key=f"book_card_{livro.isbn}"):
+                    cover, high_resolution = covers[indice]
+                    if cover:
+                        size = '' if high_resolution else 'style="max-width:128px;max-height:198px"'
+                        st.markdown(f'<div class="capa-area"><img {size} src="{escape(cover, quote=True)}" alt="Capa do livro"></div>', unsafe_allow_html=True)
                     else:
                         st.markdown('<div class="capa-area">📖 Capa indisponível</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="livro-titulo" title="{escape(livro.title, quote=True)}">{escape(livro.title)}</div>', unsafe_allow_html=True)
                     autores = "; ".join(livro.authors)
                     categorias_livro = "; ".join(livro.categories)
-                    st.markdown(f'<div class="livro-autor" title="{escape(autores, quote=True)}">Autor(es): {escape(autores)}</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="livro-categoria" title="{escape(categorias_livro, quote=True)}">Categoria: {escape(categorias_livro)}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="livro-categoria" title="{escape(categorias_livro, quote=True)}">{escape(categorias_livro)}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="livro-titulo" title="{escape(livro.title, quote=True)}">{escape(livro.title)}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="livro-autor" title="{escape(autores, quote=True)}">{escape(autores)}</div>', unsafe_allow_html=True)
                     avaliacao = f"⭐ {livro.average_rating:.1f}/5" if livro.average_rating is not None else "Sem avaliação"
                     st.markdown(f'<div class="livro-avaliacao">{avaliacao}</div>', unsafe_allow_html=True)
                     reais = f"{livro.price_cents // 100:,}".replace(",", ".")
                     preco = f"R$ {reais},{livro.price_cents % 100:02d}"
-                    st.markdown(f'<div class="livro-preco">{preco}</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="livro-estoque">📦 {livro.stock} unidades disponíveis</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="livro-preco"><small>Preço</small>{preco}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="livro-estoque">{livro.stock} unidades disponíveis</div>', unsafe_allow_html=True)
                     add_button(livro, identified)
-                    with st.expander("Ver detalhes"):
-                        st.write(livro.description or "Descrição indisponível.")
-                        if livro.published_year is not None:
-                            st.write(f"**Ano de publicação:** {livro.published_year}")
-                        if livro.num_pages is not None:
-                            st.write(f"**Páginas:** {livro.num_pages}")
-                        st.write(f"**ISBN:** {livro.isbn}")
-                        render_review(livro, identified)
+                    st.button("Ver detalhes", key=f"detalhes_{livro.isbn}", width="stretch",
+                              on_click=open_product, args=(livro.isbn,))
 
     st.divider()
     col_anterior, col_indicador, col_proxima = st.columns([1, 2, 1])
